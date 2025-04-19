@@ -13,6 +13,9 @@
   <default>
     <joint type="hinge" axis="0 0 1" limited="true" range="-.29 .29" damping="1"/>
     <motor gear=".1" ctrlrange="-1 1" ctrllimited="true"/>
+    <default class="wall">
+      <geom type="box" material="site"/>
+    </default>
   </default>
 
   <worldbody>
