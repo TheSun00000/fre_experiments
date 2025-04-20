@@ -63,8 +63,7 @@ def collect_trajectories(env, z, model, n_steps, reward_generator, num_random_st
         _, _, _, dist, _ = model(state, z)
     
     
-    # for s in tqdm(range(n_steps + num_random_steps)):
-    for s in range(n_steps + num_random_steps):
+    for s in tqdm(range(n_steps + num_random_steps)):
         # state = torch.tensor(state).to(device)
         state = state.to(device)
         

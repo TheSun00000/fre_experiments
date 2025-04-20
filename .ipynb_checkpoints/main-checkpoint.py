@@ -9,7 +9,6 @@ from utils.envs import PointMaze, TorchWrapper
 from utils.reward_generator import RewardGenerator
 from utils.networks import FRENetwork, ActorCriticContinuous
 from utils.ppo_utils import collect_trajectories, shufffle_trajectory, ppo_optimization
-from utils.logs import add_largest_maze_walls
 
 import os
 from datetime import datetime
@@ -18,9 +17,6 @@ print('[INFO] Finished imports')
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device
-
-print('device:', device)
-
 
 
 
@@ -34,8 +30,7 @@ Z_DIM = 128
 
 DISCOUNT_FACTOR = 0.95
 
-X1_RANGE, X2_RANGE = 0.25 * STATE_SCALE, 0.175 * STATE_SCALE
-# X1_RANGE, X2_RANGE = 0.3 * STATE_SCALE, 0.3 * STATE_SCALE
+X1_RANGE, X2_RANGE = 0.3 * STATE_SCALE, 0.3 * STATE_SCALE
 
 
 
@@ -228,7 +223,7 @@ def plot_logs():
     if viz_old_state is not None:
         axs[0, 2].scatter(viz_old_state[:, 0], viz_old_state[:, 1], c='blue', alpha=0.1, s=10)
         
-    add_largest_maze_walls(axs[0, 2])
+    # add_largest_maze_walls(axs[0, 2])
     axs[0, 2].set_xlim([-X1_RANGE, X1_RANGE])
     axs[0, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[0, 2].set_title('States coverage')
@@ -238,7 +233,7 @@ def plot_logs():
     if anchors_list:
         anchors = torch.concat(anchors_list).reshape(-1, 2).cpu().detach()
         axs[1, 2].scatter(anchors[:, 0], anchors[:, 1], marker='x', c='red')
-    add_largest_maze_walls(axs[1, 2])
+    # add_largest_maze_walls(axs[1, 2])
     axs[1, 2].set_xlim([-X1_RANGE, X1_RANGE])
     axs[1, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[1, 2].set_title('Training Anchors')
@@ -248,7 +243,7 @@ def plot_logs():
         axs[2, 2].scatter(viz_new_state[:, 0], viz_new_state[:, 1], c='red', alpha=0.1, s=10)
     if viz_random_state is not None:
         axs[2, 2].scatter(viz_random_state[:, 0], viz_random_state[:, 1], c='purple', alpha=0.1, s=10)
-    add_largest_maze_walls(axs[2, 2])
+    # add_largest_maze_walls(axs[2, 2])
     axs[2, 2].set_xlim([-X1_RANGE, X1_RANGE])
     axs[2, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[2, 2].set_title('Random state')
@@ -259,8 +254,8 @@ def plot_logs():
 
 
 
-# path = 'mazes/point_mass_maze_empty.xml'
-path = 'mazes/point_mass_maze_hardest.xml'
+path = 'mazes/point_mass_maze_empty.xml'
+# path = 'mazes/point_mass_maze_hardest.xml'
 base_env = PointMaze(path)
 
 num_envs = 128
@@ -270,11 +265,9 @@ env = TorchWrapper(base_env, num_envs=num_envs)
 # action = torch.zeros((128, 2)).float()
 # next_state, reward, done, truncated, info = env.step(action)
 
-# eval_num_envs = 16
-# eval_env = TorchWrapper(base_env, num_envs=eval_num_envs)
+eval_num_envs = 16
+eval_env = TorchWrapper(base_env, num_envs=eval_num_envs)
 
-
-print('[INFO] Env imported')
 
 
 
