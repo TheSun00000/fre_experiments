@@ -3,3 +3,4 @@ models
 figures
 mazes
 logs
+.slurm_logs
