@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output
 
 from utils.envs import PointMaze, TorchWrapper
-from utils.reward_generator import RewardGenerator
+from utils.reward_generator import RewardGenerator, RNDResampling
 from utils.networks import FRENetwork, ActorCriticContinuous
 from utils.ppo_utils import collect_trajectories, shufffle_trajectory, ppo_optimization
 from utils.logs import add_largest_maze_walls
@@ -342,7 +342,7 @@ for epoch in tqdm(range(100)):
     from_prior = True if (reward_generator.new_states_buffer is None) else False
     print(f'Getting new states... from_prior={from_prior}')
     trajectory, random_states, get_new_states_info = get_new_states(
-        5 if training_steps != 0 else 1,
+        5,
         env, model, reward_generator, 
         num_policy_steps=EPISODE_LENGTH, 
         num_random_steps=NUM_RANDOM_STEPS, 
@@ -385,6 +385,12 @@ for epoch in tqdm(range(100)):
     reward_generator.update_new_states_buffer(parcoured_states_and_random_states[..., :2])
     # reward_generator.new_states_buffer = parcoured_states_and_random_states[..., :2]
     
+    
+    resampler = RNDResampling()
+    dataset = reward_generator.new_states_buffer[:, -1, :].reshape(-1, 2)
+    resampler_losses = resampler.fit(dataset, epochs=1000)
+    resampling_weights = resampler.get_resampling_weights(dataset)
+    reward_generator.resampling_weights = resampling_weights
     
     
     # Remove the random first please:

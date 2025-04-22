@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from utils.networks import FRENetwork
 
 
@@ -97,6 +98,9 @@ class RewardGenerator:
         return intermediate_anchors, intermediate_rewards
         # anchors.shape, intermediate_anchors.shape, intermediate_rewards.shape
     
+    def get_importance_sampling_indices(self, N):
+        indices = torch.multinomial(self.resampling_weights, N, replacement=True)
+        return indices
     
     def get_training_data(self, batch_size, min_num_anchors, max_num_anchors, num_states, num_intermediate_anchors=10, from_new_states=False):
         assert min_num_anchors <= max_num_anchors <= num_states
@@ -112,7 +116,8 @@ class RewardGenerator:
         num_trajectories, trajectory_length = buffer.shape[0], buffer.shape[1]
         
         # Get anchors:
-        trajectories_idx_ = torch.randint(0, num_trajectories, (batch_size, 1))
+        # trajectories_idx_ = torch.randint(0, num_trajectories, (batch_size, 1))
+        trajectories_idx_ = self.get_importance_sampling_indices(batch_size).unsqueeze(-1)
         trajectories_idx = trajectories_idx_.repeat(1, max_num_anchors).reshape(-1)
         # states_idx       = torch.randint(0, buffer.shape[1], (max_num_anchors*batch_size,))
         states_idx       = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
@@ -122,7 +127,8 @@ class RewardGenerator:
         
         # Get non anchors
         num_non_anchors = num_states - max_num_anchors
-        trajectories_idx = torch.randint(0, buffer.shape[0], (num_non_anchors*batch_size,))
+        # trajectories_idx = torch.randint(0, buffer.shape[0], (num_non_anchors*batch_size,))
+        trajectories_idx = self.get_importance_sampling_indices(num_non_anchors*batch_size)
         states_idx       = torch.randint(0, buffer.shape[1], (num_non_anchors*batch_size,))
         non_anchors = buffer[trajectories_idx, states_idx]
         non_anchors = non_anchors.reshape(batch_size, num_non_anchors, 2)
@@ -291,3 +297,63 @@ class RewardGenerator:
         return z, {'anchors': anchors.cpu()}
 
         
+
+
+class RNDModule(nn.Module):
+    def __init__(self, ):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(2, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+        )
+        
+    def forward(self, x):
+        return self.model(x)
+
+class RNDResampling:
+    def __init__(self):
+        self.current = RNDModule().to(device)
+        self.current_optimizer = torch.optim.SGD(self.current.parameters())
+        self.target = RNDModule().to(device)
+        self.target.requires_grad_ = False
+        self.rnd_losses = []
+
+
+    def fit(self, dataset, epochs=1000, batch_size=16):
+
+        for _ in range(epochs):
+        
+            x = dataset[torch.randint(0, dataset.shape[0], (batch_size,))]
+            x = x.to(device)
+
+            yc = self.current(x)
+            with torch.no_grad():
+                yt = self.target(x)
+
+            loss = (yc - yt).pow(2).sum(-1).mean()
+
+            self.current_optimizer.zero_grad()
+            loss.backward()
+            self.current_optimizer.step()
+            
+            self.rnd_losses.append(loss.item())
+        
+        return self.rnd_losses
+    
+    
+    def get_resampling_weights(self, x):
+        
+        x = x.to(device)
+        with torch.no_grad():
+            yc = self.current(x)
+            yt = self.target(x)
+            w = (yc - yt).pow(2).sum(-1).cpu()
+
+
+        w = w ** 0.8
+        w = w / w.sum()
+
+        return w
