@@ -4,6 +4,8 @@ from tqdm import tqdm
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device
 
+ENTROPY_COEF = 5e-3
+
 def compute_gae_parallel(dones, rewards, values, next_values, gamma=0.95, lambda_=0.95):
     assert (
         dones.shape == rewards.shape == values.shape == next_values.shape
@@ -197,7 +199,7 @@ def ppo_optimization(trajectories, model, optimizer, epochs, batch_size):
 
             value_loss = ((return_ - new_state_value)**2).mean()
 
-            loss = policy_loss - 2e-7*entropy.mean() + 0.5*value_loss
+            loss = policy_loss - ENTROPY_COEF*entropy.mean() + 0.5*value_loss
 
             # print(return_[:5])
             # print(new_state_value[:5])

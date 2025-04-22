@@ -25,10 +25,10 @@ print('device:', device)
 
 
 
-MIN_NUM_ANCHORS = 8
-MAX_NUM_ANCHORS = 8
+MIN_NUM_ANCHORS = 32
+MAX_NUM_ANCHORS = 32
 EPISODE_LENGTH = 400
-NUM_RANDOM_STEPS = 400
+NUM_RANDOM_STEPS = 200
 STATE_SCALE = 10
 Z_DIM = 128
 
@@ -65,7 +65,7 @@ def train_on_new_states(
         min_num_anchors=MIN_NUM_ANCHORS, 
         max_num_anchors=MAX_NUM_ANCHORS,
         from_new_states=True,
-        num_states=16,
+        num_states=MAX_NUM_ANCHORS+1,
     )
     anchors = anchors.to(device)
     anchors_rewards = anchors_rewards.to(device)
@@ -196,7 +196,6 @@ def get_new_states(
 
 
 
-
 def plot_logs():
     clear_output(True)
     fig, axs = plt.subplots(3, 3, figsize=(18, 15))
@@ -223,10 +222,10 @@ def plot_logs():
     # viz_states_buffer = reward_generator.states_buffer.reshape(-1, 2)
     # viz_states_buffer = parcoured_states.reshape(-1, 2)
     
-    if viz_new_state is not None:
-        axs[0, 2].scatter(viz_new_state[:, 0], viz_new_state[:, 1], c='red', alpha=0.1, s=10)
     if viz_old_state is not None:
         axs[0, 2].scatter(viz_old_state[:, 0], viz_old_state[:, 1], c='blue', alpha=0.1, s=10)
+    if viz_new_state is not None:
+        axs[0, 2].scatter(viz_new_state[:, 0], viz_new_state[:, 1], c='red', alpha=0.1, s=10)
         
     add_largest_maze_walls(axs[0, 2])
     axs[0, 2].set_xlim([-X1_RANGE, X1_RANGE])
@@ -244,16 +243,15 @@ def plot_logs():
     axs[1, 2].set_title('Training Anchors')
     
     
-    if viz_new_state is not None:
-        axs[2, 2].scatter(viz_new_state[:, 0], viz_new_state[:, 1], c='red', alpha=0.1, s=10)
     if viz_random_state is not None:
-        axs[2, 2].scatter(viz_random_state[:, 0], viz_random_state[:, 1], c='purple', alpha=0.1, s=10)
+        axs[2, 2].scatter(viz_random_state[:, 0], viz_random_state[:, 1], c='blue', s=10)
+    if viz_policy_reaches is not None:
+        axs[2, 2].scatter(viz_policy_reaches[:, 0], viz_policy_reaches[:, 1], c='orange', s=10)
     add_largest_maze_walls(axs[2, 2])
     axs[2, 2].set_xlim([-X1_RANGE, X1_RANGE])
     axs[2, 2].set_ylim([-X2_RANGE, X2_RANGE])
-    axs[2, 2].set_title('Random state')
-    
-    
+    axs[2, 2].set_title('Policy reaching')
+        
     plt.savefig(f"{LOGS_FOLDER}/epoch_{epoch}.png")
 
 
@@ -322,6 +320,8 @@ rewards_list_1, entropies_1 = [], []
 rewards_list_2, entropies_2 = [], []
 
 viz_new_state, viz_old_state, viz_random_state = None, None, None
+viz_random_state, viz_policy_reaches = None, None
+
 states_buffer_history = []
 
 anchors_list = []
@@ -342,7 +342,7 @@ for epoch in tqdm(range(100)):
     from_prior = True if (reward_generator.new_states_buffer is None) else False
     print(f'Getting new states... from_prior={from_prior}')
     trajectory, random_states, get_new_states_info = get_new_states(
-        5,
+        5 if training_steps != 0 else 1,
         env, model, reward_generator, 
         num_policy_steps=EPISODE_LENGTH, 
         num_random_steps=NUM_RANDOM_STEPS, 
@@ -374,7 +374,13 @@ for epoch in tqdm(range(100)):
             ),
             dim=1
         )
-        
+
+
+    if reward_generator.new_states_buffer is not None:
+        viz_random_state = reward_generator.new_states_buffer[:, -1, :2].reshape(-1, 2)
+    viz_policy_reaches = trajectory['states'].reshape(-1, EPISODE_LENGTH, 4)[:, -1, :2].reshape(-1, 2)
+    
+    
     # reward_generator.update_states_buffer(parcoured_states_and_random_states)
     reward_generator.update_new_states_buffer(parcoured_states_and_random_states[..., :2])
     # reward_generator.new_states_buffer = parcoured_states_and_random_states[..., :2]
@@ -409,7 +415,7 @@ for epoch in tqdm(range(100)):
             min_num_anchors=MIN_NUM_ANCHORS,
             max_num_anchors=MAX_NUM_ANCHORS,
             from_new_states=True,
-            num_states=16,
+            num_states=64,
             non_anchor_coef=0.5,
         )
         vae_loss.append(vae_loss_dict['loss'])
@@ -427,6 +433,7 @@ for epoch in tqdm(range(100)):
     print('Policy training on new states...')
     
     model.action_var.data = torch.full((model.action_dim,), model.action_std**2, requires_grad=True, device=device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
     anchors_list = []
     for _ in tqdm(range(50), desc='Policy training', leave=False):
@@ -458,7 +465,11 @@ for epoch in tqdm(range(100)):
     
     
     os.makedirs(f"{MODEL_SAVE_FOLDER}/epoch_{epoch}")
-    torch.save(reward_generator.fre_network.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/fre_network")
-    torch.save(reward_generator.optimimizer.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/fre_network_optimizer")
-    torch.save(model.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/model")
-    torch.save(optimizer.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/optimizer")
+    torch.save(reward_generator.fre_network.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/fre_network.pth")
+    torch.save(reward_generator.optimimizer.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/fre_network_optimizer.pth")
+    torch.save(model.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/model.pth")
+    torch.save(optimizer.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/optimizer.pth")
+    torch.save({'new_states_buffer': reward_generator.new_states_buffer}, f"{MODEL_SAVE_FOLDER}/new_states_buffer.pth")
+
+
+    os.system('nvidia-smi')

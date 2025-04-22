@@ -137,7 +137,7 @@ class RewardGenerator:
         
         reward_indices = torch.arange(num_states).unsqueeze(0)
         reward_mask = reward_indices < num_anchors.unsqueeze(1)
-        rewards[reward_mask] = torch.linspace(0, 1, max_num_anchors).unsqueeze(0).repeat(batch_size, 1).reshape(-1)
+        rewards[reward_mask] = torch.linspace(0.3, 1, max_num_anchors).unsqueeze(0).repeat(batch_size, 1).reshape(-1)
         # rewards[reward_mask] = torch.exp(2*(rewards[reward_mask] - 1))
         rewards = rewards.unsqueeze(-1)
         
@@ -186,13 +186,13 @@ class RewardGenerator:
         w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
         # w = w_mean
         rewards_pred = self.fre_network.get_reward_pred(w, all_states)
-        inter_rewards_pred = self.fre_network.get_reward_pred(w, info['intermediate_anchors'].to(device))
+        # inter_rewards_pred = self.fre_network.get_reward_pred(w, info['intermediate_anchors'].to(device))
         # rewards_pred = torch.clip(rewards_pred, 0, 1)
         
         is_anchor = (rewards != 0)
         # reward_pred_loss = ((rewards_pred - rewards)**2).mean()
         reward_pred_loss = ((rewards_pred[is_anchor] - rewards[is_anchor])**2).mean() + ((rewards_pred[~is_anchor] - rewards[~is_anchor])**2).mean() * non_anchor_coef
-        reward_pred_loss += ((inter_rewards_pred - info['intermediate_rewards'].to(device))**2).mean()
+        # reward_pred_loss += ((inter_rewards_pred - info['intermediate_rewards'].to(device))**2).mean()
         # print(info['intermediate_anchors'].shape, info['intermediate_rewards'].shape, all_states.shape)
         # reward_pred_loss = ((rewards_pred[ is_anchor] - 1)**2).mean() + ((rewards_pred[~is_anchor] - 0)**2).mean() * non_anchor_coef
         # reward_pred_loss = ((rewards_pred[ is_anchor] - rewards[ is_anchor])**2).mean() + \
