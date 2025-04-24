@@ -120,7 +120,14 @@ class RewardGenerator:
         trajectories_idx_ = self.get_importance_sampling_indices(batch_size).unsqueeze(-1)
         trajectories_idx = trajectories_idx_.repeat(1, max_num_anchors).reshape(-1)
         # states_idx       = torch.randint(0, buffer.shape[1], (max_num_anchors*batch_size,))
-        states_idx       = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
+        
+        # states_idx       = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
+        
+        states_idx = torch.randint(1, trajectory_length-1, (batch_size, max_num_anchors))
+        states_idx[:, 0] = 0
+        states_idx[:, -1] = trajectory_length-1
+        states_idx = states_idx.sort().values.reshape(-1).long()
+        
         anchors = buffer[trajectories_idx, states_idx]
         anchors = anchors.reshape(batch_size, max_num_anchors, obs_dim)
         all_states[:, :max_num_anchors, :] = anchors
