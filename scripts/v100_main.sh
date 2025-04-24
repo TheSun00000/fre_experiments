@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --output=.slurm_logs/%x_%j.out
 #SBATCH --error=.slurm_logs/%x_%j.err
-#SBATCH --time=04:00:00                   # Adjust as needed
-#SBATCH --partition=gpu_p13                   # Or whatever partition V100s are under
+#SBATCH --time=10:00:00                   # Adjust as needed
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1

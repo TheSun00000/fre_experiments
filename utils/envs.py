@@ -44,6 +44,7 @@ class PointMaze(PipelineEnv):
         # )
         # qpos = self.sys.init_q
         qpos = jnp.array([0.025, 0.])
+        # qpos = jnp.array([-0.2, 0.15])
         # print(self.sys.init_q, qpos)
         qvel = hi * jax.random.normal(rng2, (self.sys.qd_size(),))
         
