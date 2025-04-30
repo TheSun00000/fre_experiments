@@ -1,0 +1,70 @@
+<mujoco model="planar point mass">
+  <include file="./common/skybox.xml" />
+  <include file="./common/visual.xml" />
+  <include file="./common/materials.xml" />
+
+  <option timestep="0.02">
+  </option>
+
+  <asset>  
+      <material name="self2" rgba=".1 .2 .3 1" />
+    </asset>
+
+  <default>
+    <joint type="hinge" axis="0 0 1" limited="true" range="-.29 .29" damping="1" />
+    <motor gear="0.4" ctrlrange="-1 1" ctrllimited="true" />
+    <default class="wall">
+      <geom type="box" material="site" />
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="light" pos="0 0 1" />
+    <camera name="fixed" pos="0 0 .75" quat="1 0 0 0" />
+    
+      
+    
+    <body name="pointmass" pos="0 0 .01">
+      <camera name="cam0" pos="0 -0.3 0.3" xyaxes="1 0 0 0 0.7 0.7" />
+      <joint name="root_x" type="slide" pos="0 0 0" axis="1 0 0" />
+      <joint name="root_y" type="slide" pos="0 0 0" axis="0 1 0" />
+      <geom name="pointmass" type="sphere" size=".01" material="self" mass=".3" />
+    </body>
+
+    
+  
+  <geom name="ground" type="plane" pos="0 0 0" size="0.25 0.17500000000000002 .1" material="grid" />
+  <geom name="wall_x" type="plane" pos="-0.25 0 .02" zaxis="1 0 0" size=".02 0.17500000000000002 .02" material="decoration" />
+  <geom name="wall_y" type="plane" pos="0 -0.17500000000000002 .02" zaxis="0 1 0" size="0.25 .02 .02" material="decoration" />
+  <geom name="wall_neg_x" type="plane" pos="0.25 0 .02" zaxis="-1 0 0" size=".02 0.17500000000000002 .02" material="decoration" />
+  <geom name="wall_neg_y" type="plane" pos="0 0.17500000000000002 .02" zaxis="0 -1 0" size="0.25 .02 .02" material="decoration" />
+  <geom name="block_0" pos="-0.150000 -0.100000 0.020000" size="0.050000 0.025000 0.020000" class="wall" />
+  <geom name="block_1" pos="-0.025000 -0.125000 0.020000" size="0.025000 0.050000 0.020000" class="wall" />
+  <geom name="block_2" pos="-0.100000 0.000000 0.020000" size="0.100000 0.025000 0.020000" class="wall" />
+  <geom name="block_3" pos="-0.225000 0.100000 0.020000" size="0.025000 0.025000 0.020000" class="wall" />
+  <geom name="block_4" pos="-0.125000 0.100000 0.020000" size="0.025000 0.075000 0.020000" class="wall" />
+  <geom name="block_5" pos="0.075000 -0.050000 0.020000" size="0.025000 0.075000 0.020000" class="wall" />
+  <geom name="block_6" pos="-0.025000 0.075000 0.020000" size="0.025000 0.050000 0.020000" class="wall" />
+  <geom name="block_7" pos="0.075000 0.125000 0.020000" size="0.025000 0.050000 0.020000" class="wall" />
+  <geom name="block_8" pos="0.175000 -0.100000 0.020000" size="0.025000 0.025000 0.020000" class="wall" />
+  <geom name="block_9" pos="0.150000 0.000000 0.020000" size="0.050000 0.025000 0.020000" class="wall" />
+  <geom name="block_10" pos="0.200000 0.100000 0.020000" size="0.050000 0.025000 0.020000" class="wall" />
+  
+  </worldbody>
+
+  <tendon>
+    <fixed name="t1">
+      <joint joint="root_x" coef="1" />
+      <joint joint="root_y" coef="0" />
+    </fixed>
+    <fixed name="t2">
+      <joint joint="root_x" coef="0" />
+      <joint joint="root_y" coef="1" />
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <motor name="t1" tendon="t1" />
+    <motor name="t2" tendon="t2" />
+  </actuator>
+</mujoco>
