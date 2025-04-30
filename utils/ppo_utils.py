@@ -52,7 +52,8 @@ def collect_trajectories(env, z, model, n_steps, reward_generator, num_random_st
     dones = torch.zeros((env.num_envs, n_steps), dtype=torch.float32)
 
     random_states = torch.zeros((env.num_envs, num_random_steps, state_dim), dtype=torch.float32)
-    
+    random_actions = torch.zeros((env.num_envs, num_random_steps, action_dim), dtype=torch.float32)
+
     state, _ = env.reset()
     
 
@@ -98,6 +99,7 @@ def collect_trajectories(env, z, model, n_steps, reward_generator, num_random_st
             next_state, reward, terminated, truncated, _ = env.step(post_process(action).cpu())
             
             random_states[:, s - n_steps] = state
+            random_actions[:, s - n_steps] = action
             
         
         
@@ -127,7 +129,7 @@ def collect_trajectories(env, z, model, n_steps, reward_generator, num_random_st
         "advantages" : advantages.reshape(-1).detach().cpu(),
     }
     
-    return trajectories, random_states
+    return trajectories, (random_states, random_actions)
 
 
 # trajectories = collect_trajectories(env, model, n_steps=128)

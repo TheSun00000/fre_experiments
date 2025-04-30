@@ -20,6 +20,8 @@ class RewardGenerator:
     
         self.from_buffer = from_buffer
         self.new_states_buffer = None
+        self.new_actions_buffer = None
+        
         self.states_buffer = None
         self.max_buffer_size = max_buffer_size
         
@@ -46,11 +48,13 @@ class RewardGenerator:
             self.states_buffer = torch.concatenate((self.states_buffer, new_states), dim=0)
         
     
-    def update_new_states_buffer(self, new_states):
+    def update_new_states_buffer(self, new_states, new_actions):
         if self.new_states_buffer is None:
             self.new_states_buffer = new_states
+            self.new_actions_buffer = new_actions
         else:
             self.new_states_buffer = torch.concatenate((self.new_states_buffer, new_states), dim=0)
+            self.new_actions_buffer = torch.concatenate((self.new_actions_buffer, new_actions), dim=0)
 
     
     

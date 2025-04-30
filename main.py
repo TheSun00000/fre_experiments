@@ -25,8 +25,8 @@ print('device:', device)
 
 
 
-MIN_NUM_ANCHORS = 100
-MAX_NUM_ANCHORS = 100
+MIN_NUM_ANCHORS = 200
+MAX_NUM_ANCHORS = 200
 EPISODE_LENGTH = 200
 NUM_RANDOM_STEPS = 50
 STATE_SCALE = 10
@@ -162,13 +162,13 @@ def get_new_states(
     model: ActorCriticContinuous, 
     reward_generator: RewardGenerator, 
     from_prior: bool,
-    num_policy_steps=1000,
-    num_random_steps=100,
+    num_policy_steps,
+    num_random_steps,
 ):
     # Get new states:
     
     
-    list_trajectory, list_random_states, list_get_new_states_info = [], [], []
+    list_trajectory, list_random_states, list_random_actions, list_get_new_states_info = [], [], [], []
 
     for _ in tqdm(range(iterations), desc='Get new states', leave=False):
         
@@ -177,7 +177,7 @@ def get_new_states(
         else:
             z, info = reward_generator.get_z_from_random_anchors(num_envs, reward_generator.min_num_anchors, reward_generator.max_num_anchors)
         
-        trajectory, random_states = collect_trajectories(
+        trajectory, (random_states, random_actions) = collect_trajectories(
             env, z, model, 
             n_steps=num_policy_steps, 
             reward_generator=reward_generator, 
@@ -186,13 +186,15 @@ def get_new_states(
         
         list_trajectory.append(trajectory)
         list_random_states.append(random_states)
+        list_random_actions.append(random_actions)
         list_get_new_states_info.append(info)
 
     trajectory = {key: torch.concat([traj[key] for traj in list_trajectory], dim=0) for key in trajectory}
     info = {key: torch.concat([info[key] for info in list_get_new_states_info], dim=0) if 'info' not in key else [info[key] for info in list_get_new_states_info] for key in info}
     random_states = torch.concat(list_random_states, dim=0)
+    random_actions = torch.concat(list_random_actions, dim=0)
     
-    return trajectory, random_states, info
+    return trajectory, random_states, random_actions, info
 
 
 
@@ -342,7 +344,7 @@ for epoch in tqdm(range(100)):
     ##### Explore new states using random actions ##################################################################
     from_prior = True if (reward_generator.new_states_buffer is None) else False
     print(f'Getting new states... from_prior={from_prior}')
-    trajectory, random_states, get_new_states_info = get_new_states(
+    trajectory, random_states, random_actions, get_new_states_info = get_new_states(
         5,
         env, model, reward_generator, 
         num_policy_steps=EPISODE_LENGTH, 
@@ -365,6 +367,13 @@ for epoch in tqdm(range(100)):
             ),
             dim=1
         )
+        actions_and_random_actions = torch.concat(
+            (
+                trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2)[to_keep],
+                random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)[to_keep]
+            ),
+            dim=1
+        )
     
     
     else:
@@ -372,6 +381,13 @@ for epoch in tqdm(range(100)):
             (
                 trajectory['states'].reshape(-1, EPISODE_LENGTH, 4),
                 random_states.reshape(-1, NUM_RANDOM_STEPS, 4)
+            ),
+            dim=1
+        )
+        actions_and_random_actions = torch.concat(
+            (
+                trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2),
+                random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)
             ),
             dim=1
         )
@@ -383,7 +399,7 @@ for epoch in tqdm(range(100)):
     
     
     # reward_generator.update_states_buffer(parcoured_states_and_random_states)
-    reward_generator.update_new_states_buffer(parcoured_states_and_random_states[..., :2])
+    reward_generator.update_new_states_buffer(parcoured_states_and_random_states[..., :2], actions_and_random_actions)
     # reward_generator.new_states_buffer = parcoured_states_and_random_states[..., :2]
     
     
