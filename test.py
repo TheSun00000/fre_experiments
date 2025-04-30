@@ -22,9 +22,9 @@ device
 print('device:', device)
 
 
-REPLAY_BUFFER_FILE = 'models/new_states_buffer_7.pth'
-FRE_FILE = 'models/fre_network_7.pth'
-POLICY_FILE = 'models/model_7.pth'
+REPLAY_BUFFER_FILE = 'models/2025-04-22_17-38-14-good/new_states_buffer.pth'
+FRE_FILE = 'models/2025-04-22_17-38-14-good/epoch_33/fre_network.pth'
+POLICY_FILE = 'models/2025-04-22_17-38-14-good/epoch_33/model.pth'
 
 print('REPLAY_BUFFER_FILE:', REPLAY_BUFFER_FILE)
 print('FRE_FILE:', FRE_FILE)
@@ -289,7 +289,7 @@ print('[INFO] Env imported')
 
 
 fre_network = FRENetwork(obs_len=2)
-fre_network.load_state_dict(torch.load(FRE_FILE))
+# fre_network.load_state_dict(torch.load(FRE_FILE))
 
 reward_generator = RewardGenerator(
     obs_dim=2,
@@ -318,7 +318,7 @@ model = ActorCriticContinuous(
     actor_hidden_layers=[512, 512, 512, 512],
     critic_hidden_layers=[512, 512, 512, 512]
 ).to(device)
-model.load_state_dict(torch.load(POLICY_FILE))
+# model.load_state_dict(torch.load(POLICY_FILE))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
@@ -342,7 +342,7 @@ training_steps = 0
 
 ##### train the VAE: ###########################################################################################
 print('VAE training...')
-for _ in tqdm(range(10), desc='VAE training', leave=False):
+for _ in tqdm(range(5000), desc='VAE training', leave=False):
     vae_loss_dict = reward_generator.train_step_VAE(
         batch_size=512,
         min_num_anchors=MIN_NUM_ANCHORS,
@@ -367,15 +367,14 @@ model.action_var.data = torch.full((model.action_dim,), model.action_std**2, req
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
 anchors_list = []
-for step in tqdm(range(10), desc='Policy training', leave=False):
+for step in tqdm(range(500), desc='Policy training', leave=False):
     avg_reward_1, entropy_1, info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH)
     anchors_list.append(info['anchors'])
     rewards_list_1.append(avg_reward_1)
     entropies_1.append(entropy_1)
     
-    if step % 1 == 0:
-        os.makedirs(f"{MODEL_SAVE_FOLDER}/step_{step}")
-        torch.save(model.state_dict(), f"{MODEL_SAVE_FOLDER}/step_{step}/model.pth")
+    if step % 10 == 0:
+        torch.save(model.state_dict(), f"{MODEL_SAVE_FOLDER}/model.pth")
         plot_logs()
 
 

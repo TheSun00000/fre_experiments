@@ -25,10 +25,10 @@ print('device:', device)
 
 
 
-MIN_NUM_ANCHORS = 32
-MAX_NUM_ANCHORS = 32
-EPISODE_LENGTH = 400
-NUM_RANDOM_STEPS = 200
+MIN_NUM_ANCHORS = 100
+MAX_NUM_ANCHORS = 100
+EPISODE_LENGTH = 200
+NUM_RANDOM_STEPS = 50
 STATE_SCALE = 10
 Z_DIM = 128
 
@@ -418,11 +418,11 @@ for epoch in tqdm(range(100)):
     print('VAE training...')
     for _ in tqdm(range(2000), desc='VAE training', leave=False):
         vae_loss_dict = reward_generator.train_step_VAE(
-            batch_size=512,
+            batch_size=64,
             min_num_anchors=MIN_NUM_ANCHORS,
             max_num_anchors=MAX_NUM_ANCHORS,
             from_new_states=True,
-            num_states=64,
+            num_states=MAX_NUM_ANCHORS*2,
             non_anchor_coef=0.5,
         )
         vae_loss.append(vae_loss_dict['loss'])
