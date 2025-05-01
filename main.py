@@ -77,12 +77,12 @@ def train_on_new_states(
     trajectory, _ = collect_trajectories(env, z, model, n_steps=num_policy_steps, reward_generator=reward_generator)
     shuffled_trajectory = shufffle_trajectory(trajectory)
     for _  in range(4):
-        entropy = ppo_optimization(shuffled_trajectory, model, optimizer, epochs=1, batch_size=512)
+        ppo_optimization_info = ppo_optimization(reward_generator, shuffled_trajectory, model, optimizer, epochs=1, batch_size=512)
         
     avg_reward = trajectory['rewards'][len(trajectory['rewards'])//num_envs-1::len(trajectory['rewards'])//num_envs].mean()
 
         
-    return avg_reward, entropy, {'anchors': anchors, 'trajectory': trajectory, 'get_training_data:info': info}
+    return {'anchors': anchors, 'trajectory': trajectory, 'avg_reward':avg_reward, 'get_training_data:info': info, **ppo_optimization_info}
 
 
 def filter_only_new_states(new, old, steps):
@@ -353,6 +353,10 @@ for epoch in tqdm(range(100)):
     )
     
     
+    parcoured_states_and_random_states = torch.concat((trajectory['states'].reshape(-1, EPISODE_LENGTH, 4), random_states.reshape(-1, NUM_RANDOM_STEPS, 4)), dim=1)
+    actions_and_random_actions = torch.concat((trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2), random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)), dim=1)
+    
+    
     if reward_generator.new_states_buffer is not None:
         potential_targets = random_states[:, -1, :2]
         old_targets = reward_generator.new_states_buffer[:, -1, :2]
@@ -360,37 +364,9 @@ for epoch in tqdm(range(100)):
         _, filter_info = filter_only_new_states(potential_targets, old_targets, steps=2000)
         to_keep = filter_info['new_score'] > 0.8
     
-        parcoured_states_and_random_states = torch.concat(
-            (
-                trajectory['states'].reshape(-1, EPISODE_LENGTH, 4)[to_keep],
-                random_states.reshape(-1, NUM_RANDOM_STEPS, 4)[to_keep]
-            ),
-            dim=1
-        )
-        actions_and_random_actions = torch.concat(
-            (
-                trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2)[to_keep],
-                random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)[to_keep]
-            ),
-            dim=1
-        )
-    
-    
-    else:
-        parcoured_states_and_random_states = torch.concat(
-            (
-                trajectory['states'].reshape(-1, EPISODE_LENGTH, 4),
-                random_states.reshape(-1, NUM_RANDOM_STEPS, 4)
-            ),
-            dim=1
-        )
-        actions_and_random_actions = torch.concat(
-            (
-                trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2),
-                random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)
-            ),
-            dim=1
-        )
+        parcoured_states_and_random_states = parcoured_states_and_random_states[to_keep]
+        actions_and_random_actions = actions_and_random_actions[to_keep]
+        
 
 
     if reward_generator.new_states_buffer is not None:
@@ -446,6 +422,10 @@ for epoch in tqdm(range(100)):
     plot_logs()
 
 
+    # Compute the representatio of all the collected trajectories
+    reward_generator.compute_z_over_all_trajectories()
+
+
     # ##### Estimate the emperical means and std to train the policy: ################################################
     # print('Mean and std estimation...')
     # empericial_mean, empericial_std = reward_generator.estimate_mean_std(steps=1000)    
@@ -460,10 +440,10 @@ for epoch in tqdm(range(100)):
 
     anchors_list = []
     for _ in tqdm(range(50), desc='Policy training', leave=False):
-        avg_reward_1, entropy_1, info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH)
+        info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH)
         anchors_list.append(info['anchors'])
-        rewards_list_1.append(avg_reward_1)
-        entropies_1.append(entropy_1)
+        rewards_list_1.append(info['avg_reward'])
+        entropies_1.append(info['entropy'])
     plot_logs()
     
     

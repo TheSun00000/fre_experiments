@@ -151,8 +151,7 @@ def shufffle_trajectory(trajectories):
 
 
 
-
-def ppo_optimization(trajectories, model, optimizer, epochs, batch_size):
+def ppo_optimization(reward_generator, trajectories, model, optimizer, epochs, batch_size):
     
     model.train()
     
@@ -189,30 +188,31 @@ def ppo_optimization(trajectories, model, optimizer, epochs, batch_size):
             surr2 = torch.clamp(ratio, 1-0.2, 1+0.2) * advantage
             policy_loss = - torch.min(surr1, surr2).mean()
             
-            # print(ratio)
-            
-            # print(advantage[:10])
-            # print(ratio[:10])
-            # print(value_loss)
-            # print(policy_loss)
-            
-            
             return_, new_state_value = return_.reshape(-1), new_state_value.reshape(-1)
-
             value_loss = ((return_ - new_state_value)**2).mean()
-
-            loss = policy_loss - ENTROPY_COEF*entropy.mean() + 0.5*value_loss
-
-            # print(return_[:5])
-            # print(new_state_value[:5])
             
+            ppo_loss = policy_loss - ENTROPY_COEF*entropy.mean() + 0.5*value_loss
+
+            
+            # Behavioral Cloning support:
+            (x, z, y), info = reward_generator.get_bc_training_data(batch_size=512)
+            action, log_p, state_value, dist, entropy = model(x, z)
+            pred = dist.loc
+            bc_loss = (pred - y).pow(2).mean()
+            
+            loss = ppo_loss + 0.5*bc_loss
             
             optimizer.zero_grad()
             loss.backward()
             clip_factor = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             
-    return entropy.mean().item()
-            
-# ppo_optimization(trajectories, model, optimizer, epochs=1, batch_size=5)
-# ppo_optimization(shuffled_trajectory, model, optimizer, epochs=5, batch_size=256)
+    # return entropy.mean().item(), policy_loss.item(), value_loss.item()
+    return {
+        'entropy': entropy.mean().item(),
+        'policy_loss': policy_loss.item(),
+        'value_loss': value_loss.item(),
+        'ppo_loss': ppo_loss.item(),
+        'bc_loss': bc_loss.item(),
+        'loss': loss.item(),
+    }

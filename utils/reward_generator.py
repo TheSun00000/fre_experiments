@@ -21,6 +21,7 @@ class RewardGenerator:
         self.from_buffer = from_buffer
         self.new_states_buffer = None
         self.new_actions_buffer = None
+        self.new_zs_buffer = None
         
         self.states_buffer = None
         self.max_buffer_size = max_buffer_size
@@ -31,6 +32,9 @@ class RewardGenerator:
         
         self.min_num_anchors = min_num_anchors
         self.max_num_anchors = max_num_anchors
+        
+        self.resampling_weights = None
+        self.pre_computed_zs = None
         
     def update_states_buffer(self, new_states):
 
@@ -106,7 +110,7 @@ class RewardGenerator:
         indices = torch.multinomial(self.resampling_weights, N, replacement=True)
         return indices
     
-    def get_training_data(self, batch_size, min_num_anchors, max_num_anchors, num_states, num_intermediate_anchors=10, from_new_states=False):
+    def get_training_data(self, batch_size, min_num_anchors, max_num_anchors, num_states, num_intermediate_anchors=10, from_new_states=False, trajectories_idx_=None):
         assert min_num_anchors <= max_num_anchors <= num_states
 
         obs_dim = self.obs_dim
@@ -121,10 +125,10 @@ class RewardGenerator:
         
         # Get anchors:
         # trajectories_idx_ = torch.randint(0, num_trajectories, (batch_size, 1))
-        trajectories_idx_ = self.get_importance_sampling_indices(batch_size).unsqueeze(-1)
+        if trajectories_idx_ is None:
+            trajectories_idx_ = self.get_importance_sampling_indices(batch_size)
+        trajectories_idx_ = trajectories_idx_.unsqueeze(-1)
         trajectories_idx = trajectories_idx_.repeat(1, max_num_anchors).reshape(-1)
-
-        # states_idx = torch.concatenate([torch.linspace(0, torch.randint(EPISODE_LENGTH, trajectory_length-1, (1,)).item(), max_num_anchors).long() for _ in range(batch_size)])
         
         states_idx       = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
         
@@ -304,9 +308,63 @@ class RewardGenerator:
             w_mean, w_log_std = self.fre_network.get_transformer_encoding(anchors, anchors_rewards, pad_mask) 
         
         eps = torch.normal(0, 1, (batch_size, self.emperical_mean.shape[0]), device=device)
-        z = w_mean + eps * torch.exp(w_log_std)
+        # z = w_mean + eps * torch.exp(w_log_std)
+        z = w_mean
         
         return z, {'anchors': anchors.cpu()}
+    
+    
+    def compute_z_over_all_trajectories(self):
+        
+        num_trajectories = self.new_states_buffer.shape[0]
+        batch_size = 512
+        indicies = torch.arange(0, num_trajectories, dtype=torch.long)
+
+        z_list = []
+
+        for i in range(0, num_trajectories, batch_size):
+            traj_idx = indicies[i:i+batch_size]
+
+            (anchors, anchors_rewards, pad_mask), (_, _), info = self.get_training_data(
+                batch_size=traj_idx.shape[0],
+                min_num_anchors=self.min_num_anchors,
+                max_num_anchors=self.max_num_anchors,
+                num_states=self.max_num_anchors+1,
+                from_new_states=True,
+                trajectories_idx_=traj_idx
+            )
+
+            anchors, anchors_rewards, pad_mask = anchors.to(device), anchors_rewards.to(device), pad_mask.to(device)
+            z, _ = self.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
+            
+            z_list.append(z)
+            
+        zs = torch.concat(z_list)
+
+        self.pre_computed_zs = zs
+        
+    
+    
+    def get_bc_training_data(self, batch_size):
+    
+        dataset_x = self.new_states_buffer
+        dataset_y = self.new_actions_buffer
+        
+        assert dataset_x is not None
+        assert dataset_y is not None
+        
+        traj_idx = self.get_importance_sampling_indices(batch_size)        
+        state_idx = torch.randint(0, dataset_x.shape[1], (batch_size,))
+        
+        x = dataset_x[traj_idx, state_idx].to(device)
+        x = torch.concat((x, torch.zeros_like(x)), dim=1)
+        
+        y = dataset_y[traj_idx, state_idx].to(device)
+        
+        z = self.pre_computed_zs[traj_idx]
+        
+        return (x, z, y), {'traj_idx': traj_idx}
+
 
         
 
