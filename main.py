@@ -493,6 +493,7 @@ for epoch in tqdm(range(100)):
     torch.save(model.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/model.pth")
     torch.save(optimizer.state_dict(), f"{MODEL_SAVE_FOLDER}/epoch_{epoch}/optimizer.pth")
     torch.save({'new_states_buffer': reward_generator.new_states_buffer}, f"{MODEL_SAVE_FOLDER}/new_states_buffer.pth")
+    torch.save({'new_actions_buffer': reward_generator.new_actions_buffer}, f"{MODEL_SAVE_FOLDER}/new_actions_buffer.pth")
 
 
     os.system('nvidia-smi')
