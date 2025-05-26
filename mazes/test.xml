@@ -1,52 +1,149 @@
-<mujoco model="planar point mass">
+
+
+
+<mujoco model="ant">
   <include file="./common/skybox.xml" />
   <include file="./common/visual.xml" />
   <include file="./common/materials.xml" />
 
-  <option timestep="0.02">
-  </option>
-
-  <asset>  
-      <material name="self2" rgba=".1 .2 .3 1" />
-    </asset>
-
+  <!-- <compiler angle="degree" coordinate="local" inertiafromgeom="true"/> -->
+  <option timestep="0.01" iterations="4" />
+  <custom>
+    <!-- brax custom params -->
+    <numeric data="0.0 0.0 0.55 1.0 0.0 0.0 0.0 0.0 1.0 0.0 -1.0 0.0 -1.0 0.0 1.0" name="init_qpos"/>
+    <numeric data="1000" name="constraint_limit_stiffness"/>
+    <numeric data="4000" name="constraint_stiffness"/>
+    <numeric data="10" name="constraint_ang_damping"/>
+    <numeric data="20" name="constraint_vel_damping"/>
+    <numeric data="0.5" name="joint_scale_pos"/>
+    <numeric data="0.2" name="joint_scale_ang"/>
+    <numeric data="0.0" name="ang_damping"/>
+    <numeric data="1" name="spring_mass_scale"/>
+    <numeric data="1" name="spring_inertia_scale"/>
+    <numeric data="15" name="solver_maxls"/>
+  </custom>
   <default>
-    <joint type="hinge" axis="0 0 1" limited="true" range="-.29 .29" damping="1" />
-    <motor gear=".1" ctrlrange="-1 1" ctrllimited="true" />
+    <joint armature="1" damping="1" limited="true"/>
+    <geom contype="0" conaffinity="0" condim="3" density="5.0" friction="1 0.5 0.5" rgba="0.4 0.33 0.26 1.0"/>
     <default class="wall">
-      <geom type="box" material="site" />
+        <geom type="box" material="site" />
     </default>
   </default>
-
+  <asset>
+    <texture builtin="gradient" height="100" rgb1="1 1 1" rgb2="0 0 0" type="skybox" width="100"/>
+    <texture builtin="flat" height="1278" mark="cross" markrgb="1 1 1" name="texgeom" random="0.01" rgb1="0.8 0.6 0.4" rgb2="0.8 0.6 0.4" type="cube" width="127"/>
+    <texture builtin="checker" height="100" name="texplane" rgb1="0 0 0" rgb2="0.8 0.8 0.8" type="2d" width="100"/>
+    <material name="MatPlane" reflectance="0.5" shininess="1" specular="1" texrepeat="60 60" texture="texplane"/>
+    <material name="geom" texture="texgeom" texuniform="true"/>
+  </asset>
   <worldbody>
-    <light name="light" pos="0 0 1" />
-    <camera name="fixed" pos="0 0 .75" quat="1 0 0 0" />
+    <light cutoff="100" diffuse="1 1 1" dir="-0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1"/>
     
-      
+    <!-- <geom conaffinity="1" condim="3" material="MatPlane" name="floor" pos="0 0 0" size="40 40 40" type="plane" rgba="0.5 0.5 0.5 1.0"/> -->
     
-    <body name="pointmass" pos="0 0 .01">
-      <camera name="cam0" pos="0 -0.3 0.3" xyaxes="1 0 0 0 0.7 0.7" />
-      <joint name="root_x" type="slide" pos="0 0 0" axis="1 0 0" />
-      <joint name="root_y" type="slide" pos="0 0 0" axis="0 1 0" />
-      <geom name="pointmass" type="sphere" size=".01" material="self" mass=".3" />
+    
+    
+    <geom name="ground" type="plane" pos="0 0 0" size="10.0 7.0 400" material="grid" conaffinity="1" condim="3" />
+    <geom name="wall_x" type="plane" pos="-10.0 0 0.8" zaxis="1 0 0" size="0.8 7.0 0.8" material="decoration" contype="1" conaffinity="1" />
+    <geom name="wall_y" type="plane" pos="0 -7.0 0.8" zaxis="0 1 0" size="10.0 0.8 0.8" material="decoration" contype="1" conaffinity="1" />
+    <geom name="wall_neg_x" type="plane" pos="10.0 0 0.8" zaxis="-1 0 0" size="0.8 7.0 0.8" material="decoration" contype="1" conaffinity="1" />
+    <geom name="wall_neg_y" type="plane" pos="0 7.0 0.8" zaxis="0 -1 0" size="10.0 0.8 0.8" material="decoration" contype="1" conaffinity="1" />
+    
+    <geom name="block_0" pos="-6.0 -4.0 0.8" size="2.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_1" pos="-1.0 -5.0 0.8" size="1.0 2.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_2" pos="-4.0 0.000000 0.8" size="4.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_3" pos="-9.0 4.0 0.8" size="1.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_4" pos="-5.0 4.0 0.8" size="1.0 3.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_5" pos="3.0 -2.0 0.8" size="1.0 3.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_6" pos="-1.0 3.0 0.8" size="1.0 2.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_7" pos="3.0 5.0 0.8" size="1.0 2.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_8" pos="7.0 -4.0 0.8" size="1.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_9" pos="6.0 0.000000 0.8" size="2.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    <geom name="block_10" pos="8.0 4.0 0.8" size="2.0 1.0 0.8" class="wall" contype="1" conaffinity="1" />
+    
+    
+    
+ 
+
+    
+
+
+
+    <body name="torso" pos="0 0 0.75">
+      <camera name="track" mode="trackcom" pos="0 -3 0.3" xyaxes="1 0 0 0 0 1"/>
+      <geom name="torso_geom" pos="0 0 0" size="0.25" type="sphere" contype="1"/>
+      <joint armature="0" damping="0" limited="false" margin="0.01" name="root" pos="0 0 0" type="free"/>
+      <body name="front_left_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 0.2 0.2 0.0" name="aux_1_geom" size="0.08" type="capsule" contype="1"/>
+        <body name="aux_1" pos="0.2 0.2 0">
+          <joint axis="0 0 1" name="hip_1" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 0.2 0.2 0.0" name="left_leg_geom" size="0.08" type="capsule" contype="1"/>
+          <body pos="0.2 0.2 0">
+            <joint axis="-1 1 0" name="ankle_1" pos="0.0 0.0 0.0" range="30 70" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 0.4 0.4 0.0" name="left_ankle_geom" size="0.08" type="capsule" contype="1"/>
+            <geom name="left_foot_geom" contype="1" pos="0.4 0.4 0" size="0.08" type="sphere" mass="0"/>
+          </body>
+        </body>
+      </body>
+      <body name="front_right_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 -0.2 0.2 0.0" name="aux_2_geom" size="0.08" type="capsule" contype="1"/>
+        <body name="aux_2" pos="-0.2 0.2 0">
+          <joint axis="0 0 1" name="hip_2" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 -0.2 0.2 0.0" name="right_leg_geom" size="0.08" type="capsule" contype="1"/>
+          <body pos="-0.2 0.2 0">
+            <joint axis="1 1 0" name="ankle_2" pos="0.0 0.0 0.0" range="-70 -30" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 -0.4 0.4 0.0" name="right_ankle_geom" size="0.08" type="capsule" contype="1"/>
+            <geom name="right_foot_geom" contype="1" pos="-0.4 0.4 0" size="0.08" type="sphere" mass="0"/>
+          </body>
+        </body>
+      </body>
+      <body name="left_back_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 -0.2 -0.2 0.0" name="aux_3_geom" size="0.08" type="capsule" contype="1"/>
+        <body name="aux_3" pos="-0.2 -0.2 0">
+          <joint axis="0 0 1" name="hip_3" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 -0.2 -0.2 0.0" name="left_back_leg_geom" size="0.08" type="capsule" contype="1"/>
+          <body pos="-0.2 -0.2 0">
+            <joint axis="-1 1 0" name="ankle_3" pos="0.0 0.0 0.0" range="-70 -30" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 -0.4 -0.4 0.0" name="third_ankle_geom" size="0.08" type="capsule" contype="1"/>
+            <geom name="third_foot_geom" contype="1" pos="-0.4 -0.4 0" size="0.08" type="sphere" mass="0"/>
+          </body>
+        </body>
+      </body>
+      <body name="right_back_leg" pos="0 0 0">
+        <geom fromto="0.0 0.0 0.0 0.2 -0.2 0.0" name="aux_4_geom" size="0.08" type="capsule" contype="1"/>
+        <body name="aux_4" pos="0.2 -0.2 0">
+          <joint axis="0 0 1" name="hip_4" pos="0.0 0.0 0.0" range="-30 30" type="hinge"/>
+          <geom fromto="0.0 0.0 0.0 0.2 -0.2 0.0" name="rightback_leg_geom" size="0.08" type="capsule" contype="1"/>
+          <body pos="0.2 -0.2 0">
+            <joint axis="1 1 0" name="ankle_4" pos="0.0 0.0 0.0" range="30 70" type="hinge"/>
+            <geom fromto="0.0 0.0 0.0 0.4 -0.4 0.0" name="fourth_ankle_geom" size="0.08" type="capsule" contype="1"/>
+            <geom name="fourth_foot_geom" contype="1" pos="0.4 -0.4 0" size="0.08" type="sphere" mass="0"/>
+          </body>
+        </body>
+      </body>
     </body>
 
-    
-  <geom name="ground" type="plane" pos="0 0 0" size="0.25 0.17500000000000002 .1" material="grid" /><geom name="wall_x" type="plane" pos="-0.25 0 .02" zaxis="1 0 0" size=".02 0.17500000000000002 .02" material="decoration" /><geom name="wall_y" type="plane" pos="0 -0.17500000000000002 .02" zaxis="0 1 0" size="0.25 .02 .02" material="decoration" /><geom name="wall_neg_x" type="plane" pos="0.25 0 .02" zaxis="-1 0 0" size=".02 0.17500000000000002 .02" material="decoration" /><geom name="wall_neg_y" type="plane" pos="0 0.17500000000000002 .02" zaxis="0 -1 0" size="0.25 .02 .02" material="decoration" /><geom name="block_0" pos="-0.150000 -0.100000 0.020000" size="0.050000 0.025000 0.020000" class="wall" /><geom name="block_1" pos="-0.025000 -0.125000 0.020000" size="0.025000 0.050000 0.020000" class="wall" /><geom name="block_2" pos="-0.100000 0.000000 0.020000" size="0.100000 0.025000 0.020000" class="wall" /><geom name="block_3" pos="-0.225000 0.100000 0.020000" size="0.025000 0.025000 0.020000" class="wall" /><geom name="block_4" pos="-0.125000 0.100000 0.020000" size="0.025000 0.075000 0.020000" class="wall" /><geom name="block_5" pos="0.075000 -0.050000 0.020000" size="0.025000 0.075000 0.020000" class="wall" /><geom name="block_6" pos="-0.025000 0.075000 0.020000" size="0.025000 0.050000 0.020000" class="wall" /><geom name="block_7" pos="0.075000 0.125000 0.020000" size="0.025000 0.050000 0.020000" class="wall" /><geom name="block_8" pos="0.175000 -0.100000 0.020000" size="0.025000 0.025000 0.020000" class="wall" /><geom name="block_9" pos="0.150000 0.000000 0.020000" size="0.050000 0.025000 0.020000" class="wall" /><geom name="block_10" pos="0.200000 0.100000 0.020000" size="0.050000 0.025000 0.020000" class="wall" /></worldbody>
 
-  <tendon>
-    <fixed name="t1">
-      <joint joint="root_x" coef="1" />
-      <joint joint="root_y" coef="0" />
-    </fixed>
-    <fixed name="t2">
-      <joint joint="root_x" coef="0" />
-      <joint joint="root_y" coef="1" />
-    </fixed>
-  </tendon>
 
+
+
+
+
+
+
+
+
+
+
+  </worldbody>
   <actuator>
-    <motor name="t1" tendon="t1" />
-    <motor name="t2" tendon="t2" />
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_4" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_4" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_1" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_1" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_2" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_2" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="hip_3" gear="150"/>
+    <motor ctrllimited="true" ctrlrange="-1.0 1.0" joint="ankle_3" gear="150"/>
   </actuator>
 </mujoco>
