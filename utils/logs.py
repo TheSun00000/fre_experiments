@@ -1,7 +1,8 @@
 import matplotlib.patches as patches
 
 
-STATE_SCALE = 10
+STATE_SCALE = 10 # Pointmaze
+STATE_SCALE = 1 # Antmaze
 
 def add_largest_maze_walls(ax):
 
@@ -19,7 +20,8 @@ def add_largest_maze_walls(ax):
         (5, 8, 1, 2)
     ]
 
-    block_size = 0.025 * STATE_SCALE
+    # block_size = 0.025 * STATE_SCALE # Pointmaze
+    block_size = 2 # Antmaze
 
     height, width = 7, 10
     torso_x, torso_y = (width - 1)*block_size, (height - 1)*block_size
@@ -36,7 +38,8 @@ def add_largest_maze_walls(ax):
         y = y * block_size * 2 - torso_y + (w - 1) * block_size - w * block_size
         h, w = h * block_size * 2, w * block_size * 2
         
-        rect = patches.Rectangle((x, y), h, w, linewidth=2, edgecolor='gray', facecolor='gray')
+        # rect = patches.Rectangle((x, y), h, w, linewidth=2, edgecolor='gray', facecolor='gray') # Pointmaze
+        rect = patches.Rectangle((x, -y), h, -w, linewidth=2, edgecolor='gray', facecolor='gray') # Antmaze
 
         ax.add_patch(rect)
         

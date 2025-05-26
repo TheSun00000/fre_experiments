@@ -5,7 +5,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
 
-from utils.envs import PointMaze, TorchWrapper
+from utils.envs import PointMaze, Ant, TorchWrapper
 from utils.reward_generator import RewardGenerator, RNDResampling
 from utils.networks import FRENetwork, ActorCriticContinuous
 from utils.ppo_utils import collect_trajectories, shufffle_trajectory, ppo_optimization
@@ -29,7 +29,8 @@ MIN_NUM_ANCHORS = 200
 MAX_NUM_ANCHORS = 200
 EPISODE_LENGTH = 200
 NUM_RANDOM_STEPS = 50
-STATE_SCALE = 10
+# STATE_SCALE = 10 # Pointmaze
+STATE_SCALE = 1 # Antmaze
 Z_DIM = 128
 
 DISCOUNT_FACTOR = 0.95
@@ -231,8 +232,8 @@ def plot_logs():
         axs[0, 2].scatter(viz_new_state[:, 0], viz_new_state[:, 1], c='red', alpha=0.1, s=10)
         
     add_largest_maze_walls(axs[0, 2])
-    axs[0, 2].set_xlim([-X1_RANGE, X1_RANGE])
-    axs[0, 2].set_ylim([-X2_RANGE, X2_RANGE])
+    # axs[0, 2].set_xlim([-X1_RANGE, X1_RANGE])
+    # axs[0, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[0, 2].set_title('States coverage')
     
     if viz_new_state is not None:
@@ -241,8 +242,8 @@ def plot_logs():
         anchors = torch.concat(anchors_list).reshape(-1, 2).cpu().detach()
         axs[1, 2].scatter(anchors[:, 0], anchors[:, 1], marker='x', c='red')
     add_largest_maze_walls(axs[1, 2])
-    axs[1, 2].set_xlim([-X1_RANGE, X1_RANGE])
-    axs[1, 2].set_ylim([-X2_RANGE, X2_RANGE])
+    # axs[1, 2].set_xlim([-X1_RANGE, X1_RANGE])
+    # axs[1, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[1, 2].set_title('Training Anchors')
     
     
@@ -251,8 +252,8 @@ def plot_logs():
     if viz_policy_reaches is not None:
         axs[2, 2].scatter(viz_policy_reaches[:, 0], viz_policy_reaches[:, 1], c='orange', s=10)
     add_largest_maze_walls(axs[2, 2])
-    axs[2, 2].set_xlim([-X1_RANGE, X1_RANGE])
-    axs[2, 2].set_ylim([-X2_RANGE, X2_RANGE])
+    # axs[2, 2].set_xlim([-X1_RANGE, X1_RANGE])
+    # axs[2, 2].set_ylim([-X2_RANGE, X2_RANGE])
     axs[2, 2].set_title('Policy reaching')
         
     plt.savefig(f"{LOGS_FOLDER}/epoch_{epoch}.png")
@@ -260,19 +261,14 @@ def plot_logs():
 
 
 
-# path = 'mazes/point_mass_maze_empty.xml'
-path = 'mazes/point_mass_maze_hardest.xml'
-base_env = PointMaze(path)
+# base_env = PointMaze('mazes/point_mass_maze_hardest.xml')
+base_env = Ant()
 
 num_envs = 128
 env = TorchWrapper(base_env, num_envs=num_envs)
 
-# state, _ = env.reset()
-# action = torch.zeros((128, 2)).float()
-# next_state, reward, done, truncated, info = env.step(action)
-
-# eval_num_envs = 16
-# eval_env = TorchWrapper(base_env, num_envs=eval_num_envs)
+STATE_DIM = env.state_dim
+ACTION_DIM = env.action_dim
 
 
 print('[INFO] Env imported')
@@ -290,28 +286,13 @@ reward_generator = RewardGenerator(
     max_num_anchors=MAX_NUM_ANCHORS,
     from_buffer=True
 )
-# reward_generator.states_buffer = torch.rand((33, 1000, 2)) * 0.6 - 0.3
-# empericial_mean, empericial_std = reward_generator.estimate_mean_std(steps=1000)
 
-# x = torch.rand((1, 10000, 2)) * 0.6 - 0.3
-# x = x * STATE_SCALE
-# x = torch.round((x + 0.3) / 0.6 * 32)
-
-# x1_vals = np.linspace(-0.25, 0.25, 100) 
-# x2_vals = np.linspace(-0.175, 0.175, 100)
-# X1, X2 = np.meshgrid(x1_vals, x2_vals)
-# state_x12 = np.column_stack((X1.ravel(), X2.ravel()))
-# x = torch.tensor(state_x12, dtype=torch.float32) * STATE_SCALE
-# x = x.reshape(1, -1, 2)
-
-# reward_generator.update_new_states_buffer(x)
-# reward_generator.update_states_buffer    (x)
 
 
 model = ActorCriticContinuous(
-    state_dim=4,
+    state_dim=env.state_dim,
     z_dim=reward_generator.len_params,
-    action_dim=2,
+    action_dim=env.action_dim,
     actor_hidden_layers=[512, 512, 512, 512],
     critic_hidden_layers=[512, 512, 512, 512]
 ).to(device)
@@ -353,8 +334,8 @@ for epoch in tqdm(range(100)):
     )
     
     
-    parcoured_states_and_random_states = torch.concat((trajectory['states'].reshape(-1, EPISODE_LENGTH, 4), random_states.reshape(-1, NUM_RANDOM_STEPS, 4)), dim=1)
-    actions_and_random_actions = torch.concat((trajectory['actions'].reshape(-1, EPISODE_LENGTH, 2), random_actions.reshape(-1, NUM_RANDOM_STEPS, 2)), dim=1)
+    parcoured_states_and_random_states = torch.concat((trajectory['states'].reshape(-1, EPISODE_LENGTH, STATE_DIM), random_states.reshape(-1, NUM_RANDOM_STEPS, STATE_DIM)), dim=1)
+    actions_and_random_actions = torch.concat((trajectory['actions'].reshape(-1, EPISODE_LENGTH, ACTION_DIM), random_actions.reshape(-1, NUM_RANDOM_STEPS, ACTION_DIM)), dim=1)
     
     
     if reward_generator.new_states_buffer is not None:
@@ -371,16 +352,16 @@ for epoch in tqdm(range(100)):
 
     if reward_generator.new_states_buffer is not None:
         viz_random_state = reward_generator.new_states_buffer[:, -1, :2].reshape(-1, 2)
-    viz_policy_reaches = trajectory['states'].reshape(-1, EPISODE_LENGTH, 4)[:, -1, :2].reshape(-1, 2)
+    viz_policy_reaches = trajectory['states'].reshape(-1, EPISODE_LENGTH, STATE_DIM)[:, -1, :2].reshape(-1, 2)
     
     
     # reward_generator.update_states_buffer(parcoured_states_and_random_states)
-    reward_generator.update_new_states_buffer(parcoured_states_and_random_states[..., :2], actions_and_random_actions)
+    reward_generator.update_new_states_buffer(parcoured_states_and_random_states, actions_and_random_actions)
     # reward_generator.new_states_buffer = parcoured_states_and_random_states[..., :2]
     
     
     resampler = RNDResampling()
-    dataset = reward_generator.new_states_buffer[:, -1, :].reshape(-1, 2)
+    dataset = reward_generator.new_states_buffer[:, -1, :2].reshape(-1, 2)
     resampler_losses = resampler.fit(dataset, epochs=1000)
     resampling_weights = resampler.get_resampling_weights(dataset)
     reward_generator.resampling_weights = resampling_weights
@@ -439,7 +420,7 @@ for epoch in tqdm(range(100)):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
 
     anchors_list = []
-    for _ in tqdm(range(50), desc='Policy training', leave=False):
+    for _ in tqdm(range(400), desc='Policy training', leave=False):
         info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH)
         anchors_list.append(info['anchors'])
         rewards_list_1.append(info['avg_reward'])

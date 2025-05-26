@@ -7,6 +7,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 Z_DIM = 128
+EPISODE_LENGTH = 200
 
 class RewardGenerator:
     def __init__(self, obs_dim, fre_network: FRENetwork, min_num_anchors, max_num_anchors, from_buffer, max_buffer_size=1e6):
@@ -110,7 +111,8 @@ class RewardGenerator:
         indices = torch.multinomial(self.resampling_weights, N, replacement=True)
         return indices
     
-    def get_training_data(self, batch_size, min_num_anchors, max_num_anchors, num_states, num_intermediate_anchors=10, from_new_states=False, trajectories_idx_=None):
+    def get_training_data(self, batch_size, min_num_anchors, max_num_anchors, num_states, num_intermediate_anchors=10, from_new_states=False, trajectories_idx_=None,
+                          anchors_from_same_trajectory=True):
         assert min_num_anchors <= max_num_anchors <= num_states
 
         obs_dim = self.obs_dim
@@ -125,29 +127,41 @@ class RewardGenerator:
         
         # Get anchors:
         # trajectories_idx_ = torch.randint(0, num_trajectories, (batch_size, 1))
-        if trajectories_idx_ is None:
-            trajectories_idx_ = self.get_importance_sampling_indices(batch_size)
-        trajectories_idx_ = trajectories_idx_.unsqueeze(-1)
-        trajectories_idx = trajectories_idx_.repeat(1, max_num_anchors).reshape(-1)
         
-        states_idx       = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
+        if anchors_from_same_trajectory:
+            if trajectories_idx_ is None:
+                trajectories_idx_ = self.get_importance_sampling_indices(batch_size)
+            trajectories_idx_ = trajectories_idx_.unsqueeze(-1)
+            trajectories_idx = trajectories_idx_.repeat(1, max_num_anchors).reshape(-1)
+            states_idx = torch.linspace(0, trajectory_length-1, max_num_anchors).long().repeat(batch_size)
+        else:
+            trajectories_idx = self.get_importance_sampling_indices(max_num_anchors*batch_size)
+            trajectories_idx_ = trajectories_idx
+            states_idx = torch.randint(0, buffer.shape[1], (max_num_anchors*batch_size,))
+        
+        base_states_idx = torch.linspace(0, EPISODE_LENGTH-1, max_num_anchors).long().repeat(batch_size)
+        # states_idx = torch.concatenate([torch.linspace(0, torch.randint(EPISODE_LENGTH, trajectory_length-1, (1,)).item(), max_num_anchors).long() for _ in range(batch_size)])
         
         # states_idx = torch.randint(1, trajectory_length-1, (batch_size, max_num_anchors))
         # states_idx[:, 0] = 0
         # states_idx[:, -1] = trajectory_length-1
         # states_idx = states_idx.sort().values.reshape(-1).long()
         
-        anchors = buffer[trajectories_idx, states_idx]
+        anchors = buffer[trajectories_idx, states_idx, :2]
         anchors = anchors.reshape(batch_size, max_num_anchors, obs_dim)
         all_states[:, :max_num_anchors, :] = anchors
+        
+        # Get the anchors for the base part of the trajectory:
+        base_anchors = buffer[trajectories_idx, base_states_idx, :2]
+        base_anchors = base_anchors.reshape(batch_size, max_num_anchors, obs_dim)
         
         # Get non anchors
         num_non_anchors = num_states - max_num_anchors
         # trajectories_idx = torch.randint(0, buffer.shape[0], (num_non_anchors*batch_size,))
         trajectories_idx = self.get_importance_sampling_indices(num_non_anchors*batch_size)
         states_idx       = torch.randint(0, buffer.shape[1], (num_non_anchors*batch_size,))
-        non_anchors = buffer[trajectories_idx, states_idx]
-        non_anchors = non_anchors.reshape(batch_size, num_non_anchors, 2)
+        non_anchors = buffer[trajectories_idx, states_idx, :2]
+        non_anchors = non_anchors.reshape(batch_size, num_non_anchors, obs_dim)
         all_states[:, max_num_anchors:, :] = non_anchors
         
             
@@ -159,7 +173,15 @@ class RewardGenerator:
         
         reward_indices = torch.arange(num_states).unsqueeze(0)
         reward_mask = reward_indices < num_anchors.unsqueeze(1)
-        rewards[reward_mask] = torch.linspace(0.3, 1, max_num_anchors).unsqueeze(0).repeat(batch_size, 1).reshape(-1)
+        if anchors_from_same_trajectory:
+            rewards[reward_mask] = torch.linspace(0.3, 1, max_num_anchors).unsqueeze(0).repeat(batch_size, 1).reshape(-1)
+        else:
+            # rewards[reward_mask] = torch.rand(max_num_anchors*batch_size).reshape(-1)
+            # candidates = torch.tensor([0.01, 0.01, 0.01, 0.01, 0.25, 0.25, 0.25, 0.5, 0.5, 1.])
+            candidates = torch.tensor([0.0, 0.25, 0.5, 0.75])
+            rewards[reward_mask] = candidates[torch.randint(0, candidates.shape[0], (max_num_anchors*batch_size,))]
+            rewards[:, max_num_anchors-1] = 1.
+            
         # rewards[reward_mask] = torch.exp(2*(rewards[reward_mask] - 1))
         rewards = rewards.unsqueeze(-1)
         
@@ -177,11 +199,12 @@ class RewardGenerator:
             'trajectories_idx': trajectories_idx_.reshape(-1),
             'intermediate_anchors': intermediate_anchors,
             'intermediate_rewards': intermediate_rewards,
+            'base_anchors': base_anchors,
         }
     
 
         
-    def train_step_VAE(self, batch_size, min_num_anchors, max_num_anchors, num_states, from_new_states=False, non_anchor_coef=1):
+    def train_step_VAE(self, batch_size, min_num_anchors, max_num_anchors, num_states, from_new_states=False, non_anchor_coef=1, anchors_from_same_trajectory=True):
         self.fre_network.train()
         
         (anchors, anchors_rewards, pad_mask), (all_states, rewards), info = self.get_training_data(
@@ -189,7 +212,8 @@ class RewardGenerator:
             min_num_anchors=min_num_anchors, 
             max_num_anchors=max_num_anchors,
             num_states=num_states,
-            from_new_states=from_new_states
+            from_new_states=from_new_states,
+            anchors_from_same_trajectory=anchors_from_same_trajectory
         )
         anchors = anchors.to(device)
         anchors_rewards = anchors_rewards.to(device)
@@ -213,7 +237,10 @@ class RewardGenerator:
         
         is_anchor = (rewards != 0)
         # reward_pred_loss = ((rewards_pred - rewards)**2).mean()
-        reward_pred_loss = ((rewards_pred[is_anchor] - rewards[is_anchor])**2).mean() + ((rewards_pred[~is_anchor] - rewards[~is_anchor])**2).mean() * non_anchor_coef
+        if anchors_from_same_trajectory:
+            reward_pred_loss = ((rewards_pred[is_anchor] - rewards[is_anchor])**2).mean() + ((rewards_pred[~is_anchor] - rewards[~is_anchor])**2).mean() * non_anchor_coef
+        else:
+            reward_pred_loss = ((rewards_pred[is_anchor] - rewards[is_anchor])**2).mean()
         # reward_pred_loss += ((inter_rewards_pred - info['intermediate_rewards'].to(device))**2).mean()
         # print(info['intermediate_anchors'].shape, info['intermediate_rewards'].shape, all_states.shape)
         # reward_pred_loss = ((rewards_pred[ is_anchor] - 1)**2).mean() + ((rewards_pred[~is_anchor] - 0)**2).mean() * non_anchor_coef
@@ -251,6 +278,8 @@ class RewardGenerator:
                 batch_size=1, 
                 min_num_anchors=self.min_num_anchors if (num_anchors is None) else num_anchors, 
                 max_num_anchors=self.max_num_anchors if (num_anchors is None) else num_anchors,
+                num_states=self.max_num_anchors+1 if (num_anchors is None) else num_anchors+1,
+                from_new_states=True
             )
             anchors = anchors.to(device)
             anchors_rewards = anchors_rewards.to(device)
@@ -279,9 +308,9 @@ class RewardGenerator:
         return z, {}
     
     
-    def get_z_from_random_anchors(self, batch_size: int, min_num_anchors:int, max_num_anchors:int):
+    def get_z_from_random_anchors(self, batch_size: int, min_num_anchors:int, max_num_anchors:int, anchors_from_same_trajectory=True):
         assert self.new_states_buffer is not None
-        self.fre_network.train()
+        self.fre_network.eval()
         
         (anchors, anchors_rewards, pad_mask), (all_states, rewards), info = self.get_training_data(
             batch_size=batch_size, 
@@ -289,18 +318,22 @@ class RewardGenerator:
             max_num_anchors=max_num_anchors,
             from_new_states=True,
             num_states=max_num_anchors+1,
+            anchors_from_same_trajectory=anchors_from_same_trajectory
         )
         anchors = anchors.to(device)
         anchors_rewards = anchors_rewards.to(device)
         pad_mask = pad_mask.to(device)
+        # base_anchors = info["base_anchors"].to(device)
 
         eval_z, _ = self.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
+        # base_z, _ = self.get_z_from_anchors(base_anchors, anchors_rewards, pad_mask)
+        
         return eval_z, {'anchors': anchors.cpu(), 'anchors_rewards': anchors_rewards.cpu(), 'get_training_data:info': info}
         
             
     def get_z_from_anchors(self, anchors: torch.Tensor, anchors_rewards: torch.Tensor, pad_mask: torch.Tensor):    
         assert anchors.shape[:-1] == pad_mask.shape
-        self.fre_network.train()
+        self.fre_network.eval()
         
         batch_size = anchors.shape[0]
         
@@ -331,7 +364,8 @@ class RewardGenerator:
                 max_num_anchors=self.max_num_anchors,
                 num_states=self.max_num_anchors+1,
                 from_new_states=True,
-                trajectories_idx_=traj_idx
+                trajectories_idx_=traj_idx,
+                anchors_from_same_trajectory=True
             )
 
             anchors, anchors_rewards, pad_mask = anchors.to(device), anchors_rewards.to(device), pad_mask.to(device)
@@ -357,7 +391,6 @@ class RewardGenerator:
         state_idx = torch.randint(0, dataset_x.shape[1], (batch_size,))
         
         x = dataset_x[traj_idx, state_idx].to(device)
-        x = torch.concat((x, torch.zeros_like(x)), dim=1)
         
         y = dataset_y[traj_idx, state_idx].to(device)
         
