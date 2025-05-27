@@ -23,11 +23,140 @@ import matplotlib.pyplot as plt
 
 from brax.io import torch as io_torch
 from brax.envs.wrappers.training import VmapWrapper 
+from dm_control import mujoco
 
 import random
 
 cpu_device = jax.devices("cpu")[0]
 gpu_device = jax.devices("gpu")[0]
+
+
+import jax
+import jax.numpy as jnp
+from brax import base
+from brax.envs.base import PipelineEnv, State
+from brax.io import mjcf
+
+
+class Ant(PipelineEnv):
+
+  # pyformat: enable
+
+
+  def __init__(
+      self,
+      path,
+      ctrl_cost_weight=0.5,
+      use_contact_forces=False,
+      contact_cost_weight=5e-4,
+      healthy_reward=1.0,
+      terminate_when_unhealthy=True,
+      healthy_z_range=(0.2, 1.0),
+      contact_force_range=(-1.0, 1.0),
+      reset_noise_scale=0.0,
+      exclude_current_positions_from_observation=True,
+    #   backend='generalized',
+      **kwargs,
+  ):
+      
+    backend='mjx'
+    # path = 'mazes/antmaze_hardest.xml'
+    # path = 'mazes/ant.xml'
+    sys = mjcf.load(path)
+
+    n_frames = 5
+
+    if backend in ['spring', 'positional']:
+      sys = sys.tree_replace({'opt.timestep': 0.005})
+      n_frames = 10
+
+    if backend == 'mjx':
+      sys = sys.tree_replace({
+          'opt.solver': mujoco.mjtSolver.mjSOL_NEWTON,
+          'opt.disableflags': mujoco.mjtDisableBit.mjDSBL_EULERDAMP,
+          'opt.iterations': 1,
+          'opt.ls_iterations': 4,
+      })
+
+    if backend == 'positional':
+      # TODO: does the same actuator strength work as in spring
+      sys = sys.replace(
+          actuator=sys.actuator.replace(
+              gear=200 * jnp.ones_like(sys.actuator.gear)
+          )
+      )
+
+    kwargs['n_frames'] = kwargs.get('n_frames', n_frames)
+
+    super().__init__(sys=sys, backend=backend, **kwargs)
+
+    self._ctrl_cost_weight = ctrl_cost_weight
+    self._use_contact_forces = use_contact_forces
+    self._contact_cost_weight = contact_cost_weight
+    self._healthy_reward = healthy_reward
+    self._terminate_when_unhealthy = terminate_when_unhealthy
+    self._healthy_z_range = healthy_z_range
+    self._contact_force_range = contact_force_range
+    self._reset_noise_scale = reset_noise_scale
+    self._exclude_current_positions_from_observation = (
+        exclude_current_positions_from_observation
+    )
+
+    if self._use_contact_forces:
+      raise NotImplementedError('use_contact_forces not implemented.')
+  
+  def reset(self, rng: jax.Array) -> State:
+    """Resets the environment to an initial state."""
+    rng, rng1, rng2 = jax.random.split(rng, 3)
+
+    low, hi = -self._reset_noise_scale, self._reset_noise_scale
+    # q = self.sys.init_q + jax.random.uniform(
+    #     rng1, (self.sys.q_size(),), minval=low, maxval=hi
+    # )
+    qpos = self.sys.init_q
+    # print(qpos.shape)
+    qpos = qpos.at[:2].set(jnp.array([2.5, 0.0]))
+    qvel = hi * jax.random.normal(rng2, (self.sys.qd_size(),))
+
+    pipeline_state = self.pipeline_init(qpos, qvel)
+    obs = self._get_obs(pipeline_state)
+
+    reward, done, zero = jnp.zeros(3)
+    metrics = {
+        'x_position': zero,
+        'y_position': zero,
+    }
+    return State(pipeline_state, obs, reward, done, metrics)
+
+  def step(self, state: State, action: jax.Array) -> State:
+    """Run one timestep of the environment's dynamics."""
+    pipeline_state0 = state.pipeline_state
+    assert pipeline_state0 is not None
+    pipeline_state = self.pipeline_step(pipeline_state0, action)
+
+    obs = self._get_obs(pipeline_state)
+    reward = 0
+    
+    state.metrics.update(
+        x_position=pipeline_state.x.pos[0, 0],
+        y_position=pipeline_state.x.pos[0, 1],
+    )
+    
+    return state.replace(pipeline_state=pipeline_state, obs=obs, reward=reward)
+
+  def _get_obs(self, pipeline_state: base.State) -> jax.Array:
+    """Observe ant body position and velocities."""
+    qpos = pipeline_state.q
+    qvel = pipeline_state.qd
+    
+    # if self._exclude_current_positions_from_observation:
+    #   qpos = pipeline_state.q[2:]
+    # qpos = pipeline_state.x.pos[0, 0]
+    
+    # print(pipeline_state.x.pos[0, 0], pipeline_state.x.pos[0, 1])
+
+    # return jnp.array([pipeline_state.x.pos[0, 0], pipeline_state.x.pos[0, 1]]) * STATE_SCALE
+    return jnp.concatenate([qpos] + [qvel])
 
 class TorchWrapper:
     def __init__(self, env, num_envs, state_dim=None):
@@ -350,6 +479,7 @@ class ActorCriticContinuous(nn.Module):
     
     
 base_env = envs.get_environment('ant', backend='mjx', exclude_current_positions_from_observation=False, ctrl_cost_weight=0, healthy_reward=0, reset_noise_scale=0)
+base_env = Ant('mazes/antmaze_empty.xml')
 
 num_envs = 128
 env = TorchWrapper(base_env, num_envs=num_envs)
