@@ -11,13 +11,10 @@ import jax.numpy as jnp
 import time
 from tqdm import tqdm
 
-from utils.reward_generator import RewardGenerator
-from utils.networks import FRENetwork
-
 # Create environment
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
-print(device)
+device
 
 
 
@@ -425,37 +422,7 @@ def ppo_optimization(trajectories, model, optimizer, epochs, batch_size):
 # ppo_optimization(trajectories, model, optimizer, epochs=1, batch_size=5)
 # ppo_optimization(shuffled_trajectory, model, optimizer, epochs=5, batch_size=256)
 
-def train_on_new_states(
-    env: TorchWrapper, 
-    model, 
-    optimizer: torch.optim.Optimizer,
-    num_policy_steps: int,
-    target_model=None
-):
-    (anchors, anchors_rewards, pad_mask), (all_states, rewards), info = reward_generator.get_training_data(
-        batch_size=num_envs, 
-        min_num_anchors=200, 
-        max_num_anchors=200,
-        from_new_states=True,
-        num_states=200+1,
-    )
-    anchors = anchors.to(device)
-    anchors_rewards = anchors_rewards.to(device)
-    pad_mask = pad_mask.to(device)
-    base_anchors = info["base_anchors"].to(device)
-    
-    z, _ = reward_generator.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
-    base_z, _ = reward_generator.get_z_from_anchors(base_anchors, anchors_rewards, pad_mask)
 
-    trajectory, _ = collect_trajectories(env, z, model, n_steps=num_policy_steps, reward_generator=reward_generator, base_z=base_z, target_model=target_model)
-    shuffled_trajectory = shufffle_trajectory(trajectory)
-    for _  in range(1):
-        ppo_optimization_info = ppo_optimization(reward_generator, shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)
-        
-    avg_reward = trajectory['rewards'][len(trajectory['rewards'])//num_envs-1::len(trajectory['rewards'])//num_envs].mean()
-
-        
-    return {'anchors': anchors, 'trajectory': trajectory, 'avg_reward':avg_reward, 'get_training_data:info': info, **ppo_optimization_info}
 
 
 
@@ -528,14 +495,6 @@ model = ActorCriticContinuous(
     critic_hidden_layers=[512, 512]
 ).to(device)
 
-fre_network = FRENetwork(obs_len=2)
-reward_generator = RewardGenerator(
-    obs_dim=2,
-    fre_network=fre_network,
-    min_num_anchors=200,
-    max_num_anchors=200,
-    from_buffer=True
-)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
 
@@ -546,17 +505,15 @@ final_coords_list = []
 EPISODE_LENGTH = 200
 
 for i in tqdm(range(10000)):
-    # trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
-    # shuffled_trajectory = shufffle_trajectory(trajectory)
+    trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
+    shuffled_trajectory = shufffle_trajectory(trajectory)
     
-    # ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)
+    ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)   
     
-    info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH, target_model=None)
-    
-    avg_reward = info['trajectory']['rewards'].mean().item()
+    avg_reward = trajectory['rewards'].mean().item()
     
     reward_list.append(avg_reward)
-    final_coords_list.append(info['trajectory']['states'].reshape(num_envs, EPISODE_LENGTH, 29)[:, -1, 0].mean().item())
+    final_coords_list.append(trajectory['states'].reshape(num_envs, EPISODE_LENGTH, 29)[:, -1, 0].mean().item())
     
     if i % 10 == 0:
         clear_output(True)
