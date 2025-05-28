@@ -352,7 +352,7 @@ def collect_trajectories(env, model, n_steps):
     
     # Replace unhealthy trajectories with healthy trajectories:
     healthy_idx = healthy.int().argmax()
-    for i in torch.tensor([True, False, True, False]).nonzero().flatten():
+    for i in (~healthy_idx).nonzero().flatten():
         for key in trajectories:
             trajectories[key][i*200:(i+1)*200] = trajectories[key][healthy_idx*200:(healthy_idx+1)*200]
     

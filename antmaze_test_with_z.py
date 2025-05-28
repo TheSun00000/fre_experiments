@@ -349,7 +349,7 @@ def collect_trajectories(env, model, n_steps):
     
     # Replace unhealthy trajectories with healthy trajectories:
     healthy_idx = healthy.int().argmax()
-    for i in torch.tensor([True, False, True, False]).nonzero().flatten():
+    for i in (~healthy_idx).nonzero().flatten():
         for key in trajectories:
             trajectories[key][i*200:(i+1)*200] = trajectories[key][healthy_idx*200:(healthy_idx+1)*200]
     
@@ -533,7 +533,7 @@ for i in tqdm(range(10000)):
         fig, axs = plt.subplots(1, 2, figsize=(10, 4))
         axs[0].plot(reward_list)
         axs[1].plot(final_coords_list)
-        plt.savefig(f"tmp/antmaze_simple_test.png")
+        plt.savefig(f"tmp/antmaze_simple_test_with_z.png")
         # plt.show()
         
     # break
