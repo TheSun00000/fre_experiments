@@ -13,4 +13,4 @@ conda activate olivier
 
 nvidia-smi
 
-python test.py
+python antmaze_test.py

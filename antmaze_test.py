@@ -502,10 +502,10 @@ reward_list = []
 final_coords_list = []
 
 
-
+EPISODE_LENGTH = 200
 
 for i in tqdm(range(10000)):
-    trajectory, info = collect_trajectories(env, model, n_steps=1000)
+    trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
     shuffled_trajectory = shufffle_trajectory(trajectory)
     
     ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)   
@@ -513,7 +513,7 @@ for i in tqdm(range(10000)):
     avg_reward = trajectory['rewards'].mean().item()
     
     reward_list.append(avg_reward)
-    final_coords_list.append(trajectory['states'].reshape(num_envs, 1000, 29)[:, -1, 0].mean().item())
+    final_coords_list.append(trajectory['states'].reshape(num_envs, EPISODE_LENGTH, 29)[:, -1, 0].mean().item())
     
     if i % 10 == 0:
         clear_output(True)
