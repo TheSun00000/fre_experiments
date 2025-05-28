@@ -116,7 +116,7 @@ class Ant(PipelineEnv):
       sys = sys.tree_replace({
           'opt.solver': mujoco.mjtSolver.mjSOL_NEWTON,
           'opt.disableflags': mujoco.mjtDisableBit.mjDSBL_EULERDAMP,
-          'opt.iterations': 4,
+          'opt.iterations': 1,
           'opt.ls_iterations': 4,
       })
 

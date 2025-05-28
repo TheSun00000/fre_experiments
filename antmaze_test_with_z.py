@@ -76,7 +76,7 @@ class Ant(PipelineEnv):
       sys = sys.tree_replace({
           'opt.solver': mujoco.mjtSolver.mjSOL_NEWTON,
           'opt.disableflags': mujoco.mjtDisableBit.mjDSBL_EULERDAMP,
-          'opt.iterations': 4,
+          'opt.iterations': 1,
           'opt.ls_iterations': 4,
       })
 
@@ -263,6 +263,7 @@ def collect_trajectories(env, model, n_steps):
     state_values = torch.zeros((env.num_envs, n_steps), dtype=torch.float32)
     dones = torch.zeros((env.num_envs, n_steps), dtype=torch.float32)
 
+    healthy = torch.full((env.num_envs,), fill_value=True)
     
     state, _ = env.reset()
     
@@ -283,6 +284,12 @@ def collect_trajectories(env, model, n_steps):
     for s in range(n_steps):
         # state = torch.tensor(state).to(device)
         state = state.to(device)
+        
+        if state.isnan().any():
+            non_healthy_idx = state.isnan().any(dim=1).cpu()
+            healthy[non_healthy_idx] = False
+            # print(healthy)
+            state[~healthy] = 0
         
         with torch.no_grad():
 
@@ -339,6 +346,12 @@ def collect_trajectories(env, model, n_steps):
         "returns" : returns.reshape(-1).detach().cpu(),
         "advantages" : advantages.reshape(-1).detach().cpu(),
     }
+    
+    # Replace unhealthy trajectories with healthy trajectories:
+    healthy_idx = healthy.int().argmax()
+    for i in torch.tensor([True, False, True, False]).nonzero().flatten():
+        for key in trajectories:
+            trajectories[key][i*200:(i+1)*200] = trajectories[key][healthy_idx*200:(healthy_idx+1)*200]
     
     return trajectories, {"rollout": rollout, "env.step:info": info}
 
