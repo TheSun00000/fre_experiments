@@ -1,3 +1,4 @@
+
 import torch
 import torch.nn as nn
 
@@ -11,13 +12,10 @@ import jax.numpy as jnp
 import time
 from tqdm import tqdm
 
-from utils.reward_generator import RewardGenerator
-from utils.networks import FRENetwork
-
 # Create environment
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
-print(device)
+device
 
 
 
@@ -79,7 +77,7 @@ class Ant(PipelineEnv):
       sys = sys.tree_replace({
           'opt.solver': mujoco.mjtSolver.mjSOL_NEWTON,
           'opt.disableflags': mujoco.mjtDisableBit.mjDSBL_EULERDAMP,
-          'opt.iterations': 1,
+          'opt.iterations': 4,
           'opt.ls_iterations': 4,
       })
 
@@ -352,12 +350,12 @@ def collect_trajectories(env, model, n_steps):
     
     # Replace unhealthy trajectories with healthy trajectories:
     healthy_idx = healthy.int().argmax()
+    # print((~healthy_idx).nonzero().flatten())
     for i in (~healthy_idx).nonzero().flatten():
         for key in trajectories:
             trajectories[key][i*200:(i+1)*200] = trajectories[key][healthy_idx*200:(healthy_idx+1)*200]
     
     return trajectories, {"rollout": rollout, "env.step:info": info}
-
 
 
 # trajectories = collect_trajectories(env, model, n_steps=128)
@@ -439,37 +437,7 @@ def ppo_optimization(trajectories, model, optimizer, epochs, batch_size):
 # ppo_optimization(trajectories, model, optimizer, epochs=1, batch_size=5)
 # ppo_optimization(shuffled_trajectory, model, optimizer, epochs=5, batch_size=256)
 
-def train_on_new_states(
-    env: TorchWrapper, 
-    model, 
-    optimizer: torch.optim.Optimizer,
-    num_policy_steps: int,
-    target_model=None
-):
-    (anchors, anchors_rewards, pad_mask), (all_states, rewards), info = reward_generator.get_training_data(
-        batch_size=num_envs, 
-        min_num_anchors=200, 
-        max_num_anchors=200,
-        from_new_states=True,
-        num_states=200+1,
-    )
-    anchors = anchors.to(device)
-    anchors_rewards = anchors_rewards.to(device)
-    pad_mask = pad_mask.to(device)
-    base_anchors = info["base_anchors"].to(device)
-    
-    z, _ = reward_generator.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
-    base_z, _ = reward_generator.get_z_from_anchors(base_anchors, anchors_rewards, pad_mask)
 
-    trajectory, _ = collect_trajectories(env, z, model, n_steps=num_policy_steps, reward_generator=reward_generator, base_z=base_z, target_model=target_model)
-    shuffled_trajectory = shufffle_trajectory(trajectory)
-    for _  in range(1):
-        ppo_optimization_info = ppo_optimization(reward_generator, shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)
-        
-    avg_reward = trajectory['rewards'][len(trajectory['rewards'])//num_envs-1::len(trajectory['rewards'])//num_envs].mean()
-
-        
-    return {'anchors': anchors, 'trajectory': trajectory, 'avg_reward':avg_reward, 'get_training_data:info': info, **ppo_optimization_info}
 
 
 
@@ -523,9 +491,8 @@ class ActorCriticContinuous(nn.Module):
         
         return action, log_p, value, dist, dist.entropy()
     
-    
-    
-    
+
+
 base_env = envs.get_environment('ant', backend='mjx', exclude_current_positions_from_observation=False, ctrl_cost_weight=0, healthy_reward=0, reset_noise_scale=0)
 base_env = Ant('mazes/antmaze_empty.xml')
 
@@ -542,14 +509,6 @@ model = ActorCriticContinuous(
     critic_hidden_layers=[512, 512]
 ).to(device)
 
-fre_network = FRENetwork(obs_len=2)
-reward_generator = RewardGenerator(
-    obs_dim=2,
-    fre_network=fre_network,
-    min_num_anchors=200,
-    max_num_anchors=200,
-    from_buffer=True
-)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
 
@@ -560,17 +519,18 @@ final_coords_list = []
 EPISODE_LENGTH = 200
 
 for i in tqdm(range(10000)):
-    # trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
-    # shuffled_trajectory = shufffle_trajectory(trajectory)
     
-    # ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)
     
-    info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH, target_model=None)
     
-    avg_reward = info['trajectory']['rewards'].mean().item()
+    trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
+    shuffled_trajectory = shufffle_trajectory(trajectory)
+    
+    ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)   
+    
+    avg_reward = trajectory['rewards'].mean().item()
     
     reward_list.append(avg_reward)
-    final_coords_list.append(info['trajectory']['states'].reshape(num_envs, EPISODE_LENGTH, 29)[:, -1, 0].mean().item())
+    final_coords_list.append(trajectory['states'].reshape(num_envs, EPISODE_LENGTH, 29)[:, -1, 0].mean().item())
     
     if i % 10 == 0:
         clear_output(True)
