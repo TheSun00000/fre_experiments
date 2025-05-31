@@ -1,20 +1,8 @@
 import torch
 import torch.nn as nn
-
 import numpy as np
 
-import brax
-from brax import envs
-from brax.envs import wrappers
-import jax
-import jax.numpy as jnp
-import time
 from tqdm import tqdm
-
-from utils.reward_generator import RewardGenerator
-from utils.networks import FRENetwork
-
-# Create environment
 
 device = 'cuda' if torch.cuda.is_available() else "cpu"
 print(device)
@@ -26,205 +14,28 @@ import matplotlib.pyplot as plt
 
 
 
-from brax.io import torch as io_torch
-from brax.envs.wrappers.training import VmapWrapper 
-from dm_control import mujoco
+import gymnasium as gym
+from gymnasium.vector import AsyncVectorEnv
 
-import random
+# Factory function to create one environment
+def make_env():
+    def _init():
+        return gym.make("Ant-v4", exclude_current_positions_from_observation=False)
+    return _init
 
-cpu_device = jax.devices("cpu")[0]
-gpu_device = jax.devices("gpu")[0]
+# Create a list of 128 env constructors
+num_envs = 128
+env_fns = [make_env() for _ in range(num_envs)]
 
+# Create vectorized environment
+env = AsyncVectorEnv(env_fns)
 
-import jax
-import jax.numpy as jnp
-from brax import base
-from brax.envs.base import PipelineEnv, State
-from brax.io import mjcf
+# Reset all environments
 
-
-
-
-
-
-class Ant(PipelineEnv):
-
-  # pyformat: enable
+env.state_dim = env.single_observation_space.shape[0]
+env.action_dim = env.single_action_space.shape[0]
 
 
-  def __init__(
-      self,
-      path,
-      ctrl_cost_weight=0.5,
-      use_contact_forces=False,
-      contact_cost_weight=5e-4,
-      healthy_reward=1.0,
-      terminate_when_unhealthy=True,
-      healthy_z_range=(0.2, 1.0),
-      contact_force_range=(-1.0, 1.0),
-      reset_noise_scale=0.0,
-      exclude_current_positions_from_observation=True,
-    #   backend='generalized',
-      **kwargs,
-  ):
-      
-    backend='mjx'
-    # path = 'mazes/antmaze_hardest.xml'
-    # path = 'mazes/ant.xml'
-    sys = mjcf.load(path)
-
-    n_frames = 5
-
-    if backend in ['spring', 'positional']:
-      sys = sys.tree_replace({'opt.timestep': 0.005})
-      n_frames = 10
-
-    if backend == 'mjx':
-      sys = sys.tree_replace({
-          'opt.solver': mujoco.mjtSolver.mjSOL_NEWTON,
-          'opt.disableflags': mujoco.mjtDisableBit.mjDSBL_EULERDAMP,
-          'opt.iterations': 4,
-          'opt.ls_iterations': 4,
-      })
-
-    if backend == 'positional':
-      # TODO: does the same actuator strength work as in spring
-      sys = sys.replace(
-          actuator=sys.actuator.replace(
-              gear=200 * jnp.ones_like(sys.actuator.gear)
-          )
-      )
-
-    kwargs['n_frames'] = kwargs.get('n_frames', n_frames)
-
-    super().__init__(sys=sys, backend=backend, **kwargs)
-
-    self._ctrl_cost_weight = ctrl_cost_weight
-    self._use_contact_forces = use_contact_forces
-    self._contact_cost_weight = contact_cost_weight
-    self._healthy_reward = healthy_reward
-    self._terminate_when_unhealthy = terminate_when_unhealthy
-    self._healthy_z_range = healthy_z_range
-    self._contact_force_range = contact_force_range
-    self._reset_noise_scale = reset_noise_scale
-    self._exclude_current_positions_from_observation = (
-        exclude_current_positions_from_observation
-    )
-
-    if self._use_contact_forces:
-      raise NotImplementedError('use_contact_forces not implemented.')
-  
-  def reset(self, rng: jax.Array) -> State:
-    """Resets the environment to an initial state."""
-    rng, rng1, rng2 = jax.random.split(rng, 3)
-
-    low, hi = -self._reset_noise_scale, self._reset_noise_scale
-    # q = self.sys.init_q + jax.random.uniform(
-    #     rng1, (self.sys.q_size(),), minval=low, maxval=hi
-    # )
-    qpos = self.sys.init_q
-    # print(qpos.shape)
-    qpos = qpos.at[:2].set(jnp.array([2.5, 0.0]))
-    qvel = hi * jax.random.normal(rng2, (self.sys.qd_size(),))
-
-    pipeline_state = self.pipeline_init(qpos, qvel)
-    obs = self._get_obs(pipeline_state)
-
-    reward, done, zero = jnp.zeros(3)
-    metrics = {
-        'x_position': zero,
-        'y_position': zero,
-    }
-    return State(pipeline_state, obs, reward, done, metrics)
-
-  def step(self, state: State, action: jax.Array) -> State:
-    """Run one timestep of the environment's dynamics."""
-    pipeline_state0 = state.pipeline_state
-    assert pipeline_state0 is not None
-    pipeline_state = self.pipeline_step(pipeline_state0, action)
-
-    obs = self._get_obs(pipeline_state)
-    reward = 0
-    
-    state.metrics.update(
-        x_position=pipeline_state.x.pos[0, 0],
-        y_position=pipeline_state.x.pos[0, 1],
-    )
-    
-    return state.replace(pipeline_state=pipeline_state, obs=obs, reward=reward)
-
-  def _get_obs(self, pipeline_state: base.State) -> jax.Array:
-    """Observe ant body position and velocities."""
-    qpos = pipeline_state.q
-    qvel = pipeline_state.qd
-    
-    # if self._exclude_current_positions_from_observation:
-    #   qpos = pipeline_state.q[2:]
-    # qpos = pipeline_state.x.pos[0, 0]
-    
-    # print(pipeline_state.x.pos[0, 0], pipeline_state.x.pos[0, 1])
-
-    # return jnp.array([pipeline_state.x.pos[0, 0], pipeline_state.x.pos[0, 1]]) * STATE_SCALE
-    return jnp.concatenate([qpos] + [qvel])
-
-class TorchWrapper:
-    def __init__(self, env, num_envs, state_dim=None):
-        
-        self.env = VmapWrapper(env, batch_size=num_envs)
-        self.num_envs = num_envs
-        self.state_dim = state_dim if state_dim is not None else env.observation_size
-        self.action_dim = env.action_size
-        
-        
-        # # JIT the reset and step functions
-        # @jax.jit
-        # def reset_fn(self, rng):
-        #     return self.env.reset(rng)
-
-        # @jax.jit
-        # def step_fn(self, state, action):
-        #     return self.env.step(state, action)
-        
-        self.reset_fn = jax.jit(self.env.reset)
-        self.step_fn = jax.jit(self.env.step)
-        
-    
-    def reset(self, seed=None):
-        
-        rng = jax.random.PRNGKey(random.randint(0, 99999999))
-        state = self.reset_fn(rng)
-        self.state = state
-        return io_torch.jax_to_torch(state.obs), {}
-    
-    def step(self, action: torch.Tensor):
-        
-        action = io_torch.torch_to_jax(action)
-        action = jax.device_put(action, gpu_device)
-        next_state = self.step_fn(self.state, action)
-        observation, reward, done = next_state.obs, next_state.reward, next_state.done
-        
-        self.state = next_state
-                
-        observation = io_torch.jax_to_torch(observation)
-        reward = io_torch.jax_to_torch(reward)
-        done = io_torch.jax_to_torch(done)
-        
-        info = {
-            'x_coordinate': float(next_state.pipeline_state.x.pos[0, 0][0]),
-            'y_coordinate': float(next_state.pipeline_state.x.pos[0, 1][0]),
-        }
-        
-        
-        self.state = next_state
-        truncated = torch.full_like(done, fill_value=False)
-        
-        
-        
-        return observation.cpu(), reward.cpu(), done.cpu(), truncated.cpu(), info
-        
-        
-        
-        
 def compute_gae_parallel(dones, rewards, values, next_values, gamma=0.99, lambda_=0.95):
     assert (
         dones.shape == rewards.shape == values.shape == next_values.shape
@@ -259,13 +70,13 @@ def post_process(action):
 
 
 
-def collect_trajectories(env, z, model, n_steps, reward_generator: RewardGenerator, num_random_steps=0, base_z=None, target_model=None):
+def collect_trajectories(env, z, model, n_steps, reward_generator, num_random_steps=0, base_z=None, target_model=None):
 
     # state_dim, action_dim = env.single_observation_space.shape[0], env.single_action_space.shape[0]
     state_dim, action_dim = env.state_dim, env.action_dim
     
     states = torch.zeros((env.num_envs, n_steps, state_dim), dtype=torch.float32)
-    zs = torch.zeros((env.num_envs, n_steps, reward_generator.len_params), dtype=torch.float32)
+    zs = torch.zeros((env.num_envs, n_steps, 128), dtype=torch.float32)
     actions = torch.zeros((env.num_envs, n_steps, action_dim), dtype=torch.float32)
     rewards = torch.zeros((env.num_envs, n_steps), dtype=torch.float32)
     log_ps = torch.zeros((env.num_envs, n_steps), dtype=torch.float32)
@@ -278,6 +89,7 @@ def collect_trajectories(env, z, model, n_steps, reward_generator: RewardGenerat
     random_actions = torch.zeros((env.num_envs, num_random_steps, action_dim), dtype=torch.float32)
     
     state, _ = env.reset()
+    state = torch.tensor(state).float()
     
     # tensor([-2.2573,  0.2734])
     # state = torch.tensor([[-2.2573,  0.2734, 0., 0.]]).repeat(env.num_envs, 1)
@@ -325,13 +137,19 @@ def collect_trajectories(env, z, model, n_steps, reward_generator: RewardGenerat
                 
                         
                 
-            next_state, reward, terminated, truncated, _ = env.step(post_process(action))
+            next_state, reward, terminated, truncated, _ = env.step(post_process(action).tolist())
             done = terminated * truncated
+            
+            next_state = torch.tensor(next_state).float()
+            reward = torch.tensor(reward)
+            done = torch.tensor(done)
+            
 
             # print(state[..., :2].shape, z.shape)
             # gm_reward = reward_generator.get_reward(state[..., :2], z)
-            gm_reward = state[..., 0].cpu()
+            # gm_reward = state[..., 0].cpu()
             # gm_reward = torch.zeros((env.num_envs,))
+            gm_reward = reward
             
             states[:, s] = state
             zs[:, s] = z.squeeze(-1)
@@ -354,11 +172,11 @@ def collect_trajectories(env, z, model, n_steps, reward_generator: RewardGenerat
             
         
         
-        rollout.append((
-            np.array(env.state.pipeline_state.x.pos),
-            np.array(env.state.pipeline_state.x.rot),
-            post_process(action)
-        ))
+        # rollout.append((
+        #     np.array(env.state.pipeline_state.x.pos),
+        #     np.array(env.state.pipeline_state.x.rot),
+        #     post_process(action)
+        # ))
         
         state = next_state
         
@@ -380,7 +198,7 @@ def collect_trajectories(env, z, model, n_steps, reward_generator: RewardGenerat
     trajectories = {
         # "descriptors": condition_descriptor.unsqueeze(1).repeat(1, n_steps, 1).reshape(-1, BEHAVIOR_DIM**2),
         "states" :  states.reshape(-1, state_dim).detach().cpu(),
-        "zs" :  zs.reshape(-1, reward_generator.len_params).detach().cpu(),
+        "zs" :  zs.reshape(-1, 128).detach().cpu(),
         "actions" : actions.reshape(-1, action_dim).detach().cpu(),
         "rewards" : rewards.reshape(-1).detach().cpu(),
         "dones" : dones.reshape(-1).detach().cpu(),
@@ -414,8 +232,6 @@ def shufffle_trajectory(trajectories):
 
     shuffled_trajectories = {key: tensor[permutation] for key, tensor in trajectories.items()}
     return shuffled_trajectories
-
-
 
 
 
@@ -480,15 +296,16 @@ def ppo_optimization(reward_generator, trajectories, model, optimizer, epochs, b
         'ppo_loss': ppo_loss.item(),
         'loss': loss.item(),
     }
-            
-# ppo_optimization(trajectories, model, optimizer, epochs=1, batch_size=5)
-# ppo_optimization(shuffled_trajectory, model, optimizer, epochs=5, batch_size=256)
-
+  
+  
+  
+  
+  
 def train_on_new_states(
-    env: TorchWrapper, 
+    env, 
     model, 
     optimizer: torch.optim.Optimizer,
-    reward_generator: RewardGenerator,
+    reward_generator,
     num_policy_steps: int,
     target_model=None
 ):
@@ -504,7 +321,9 @@ def train_on_new_states(
     # pad_mask = pad_mask.to(device)
     # base_anchors = info["base_anchors"].to(device)
     
-    z, _ = reward_generator.get_z_from_prior(num_envs)
+    # z, _ = reward_generator.get_z_from_prior(num_envs)
+    z = torch.normal(0, 1, size=(num_envs, 128), device=device)
+    z = torch.zeros_like(z)
     
     
     # z, _ = reward_generator.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
@@ -519,6 +338,9 @@ def train_on_new_states(
 
         
     return {'anchors': None, 'trajectory': trajectory, 'avg_reward':avg_reward, 'get_training_data:info': None, **ppo_optimization_info}
+
+
+
 
 
 class ActorCriticContinuous(nn.Module):
@@ -574,27 +396,12 @@ class ActorCriticContinuous(nn.Module):
         return action, log_p, value, dist, dist.entropy()    
     
     
-
-base_env = envs.get_environment('ant', backend='mjx', exclude_current_positions_from_observation=False, ctrl_cost_weight=0, healthy_reward=0, reset_noise_scale=0)
-base_env = Ant('mazes/antmaze_empty.xml')
-
-num_envs = 128
-env = TorchWrapper(base_env, num_envs=num_envs)
-
-
-fre_network = FRENetwork(obs_len=2)
-reward_generator = RewardGenerator(
-    obs_dim=2,
-    fre_network=fre_network,
-    min_num_anchors=200,
-    max_num_anchors=200,
-    from_buffer=True
-)
-
+    
+len_params = 128
 model = ActorCriticContinuous(
-    state_dim=env.state_dim,
-    z_dim=reward_generator.len_params,
-    action_dim=env.action_dim,
+    state_dim=env.single_observation_space.shape[0],
+    z_dim=len_params,
+    action_dim=env.single_action_space.shape[0],
     actor_hidden_layers=[512, 512, 512, 512],
     critic_hidden_layers=[512, 512, 512, 512]
 ).to(device)
@@ -607,13 +414,15 @@ final_coords_list = []
 
 EPISODE_LENGTH = 200
 
+
+
 for i in tqdm(range(10000)):
     # trajectory, info = collect_trajectories(env, model, n_steps=EPISODE_LENGTH)
     # shuffled_trajectory = shufffle_trajectory(trajectory)
     
     # ppo_optimization(shuffled_trajectory, model, optimizer, epochs=4, batch_size=1024)
     
-    info = train_on_new_states(env, model, optimizer, reward_generator, num_policy_steps=EPISODE_LENGTH, target_model=None)
+    info = train_on_new_states(env, model, optimizer, None, num_policy_steps=EPISODE_LENGTH, target_model=None)
     
     avg_reward = info['trajectory']['rewards'].mean().item()
     
@@ -625,7 +434,6 @@ for i in tqdm(range(10000)):
         fig, axs = plt.subplots(1, 2, figsize=(10, 4))
         axs[0].plot(reward_list)
         axs[1].plot(final_coords_list)
-        plt.savefig(f"tmp/antmaze_simple_test_with_z.png")
+        plt.plot()
         # plt.show()
-        
-    # break
+        plt.savefig(f"tmp/ant-v4.png")
