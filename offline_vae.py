@@ -180,6 +180,20 @@ resampling_weights = resampler.get_resampling_weights(rnd_dataset, alpha=1.)
 resampling_weights = resampling_weights
 
 
+def iou_similarity(traj1, traj2, grid_size=2):
+    traj1 = (np.array(traj1[..., :2]) / grid_size).astype(int)
+    traj2 = (np.array(traj2[..., :2]) / grid_size).astype(int)
+
+    set1 = set(map(tuple, traj1))
+    set2 = set(map(tuple, traj2))
+
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+
+    return intersection / union if union > 0 else 0.0
+
+
+
 # Trajectory encoder:
 
 class PositionalEncoding(nn.Module):
@@ -336,11 +350,12 @@ def trajectory_value_function_2(states, next_states, target_trajectory):
 
 
 def get_importance_sampling_indices(N, weights):
-    indices = torch.multinomial(weights, N, replacement=True)
+    # indices = torch.multinomial(weights, N, replacement=False)
+    indices = torch.multinomial(weights, N, replacement=(N >= weights.shape[0]))
     return indices
 
-def get_iql_training_data(batch_size, num_states, num_trajectory_states, trajectory_indicies:torch.Tensor=None):
-
+def get_iql_training_data(args, batch_size, num_states, num_trajectory_states, trajectories_near_trajectories_indicices, trajectory_indicies:torch.Tensor=None):
+    
     # batch_size = 16
     # num_trajectory_states = 200
     # num_states = 1024
@@ -373,12 +388,7 @@ def get_iql_training_data(batch_size, num_states, num_trajectory_states, traject
         target_trajectory = dataset_trajectories[trajectory_idx, :, :]
         target_action = dataset_actions[trajectory_idx, :, :]
 
-        t = dataset_trajectories[trajectory_idx, ::100, :2].to(device)
-        x = dataset_trajectories[:, ::100, :2].reshape(-1, 2).to(device)
-        distance_to_trajectory = (x[:, None] - t[None]).pow(2).sum(-1).reshape(dataset_trajectories.shape[0], -1, t.shape[0]).min(dim=-1).values.sum(dim=-1)
-        distance_to_trajectory = distance_to_trajectory.cpu()
-        
-        near_trajectories_indicices = torch.nonzero(distance_to_trajectory < 10).flatten()
+        near_trajectories_indicices = torch.tensor(trajectories_near_trajectories_indicices[trajectory_idx])
         
         # near_trajectories = dataset_trajectories[near_trajectories_indicices]
 
@@ -470,8 +480,30 @@ def get_training_data_0(batch_size, num_states, num_trajectory_states, trajector
         # 'target_actions': target_actions.to(device),
     }
     
+
+
+
     
-def main(args):    
+def main(args):
+
+    trajectories_near_trajectories_indicices = []
+    if args.use_value_function:
+        if args.use_iou_similarity:
+            for trajectory_idx in tqdm(range(dataset_trajectories.shape[0]), desc='Finding near trajectories'):
+                t = dataset_trajectories[trajectory_idx, ::100, :2]
+                x = dataset_trajectories[:, ::100, :2]
+                sims = torch.tensor([iou_similarity(t, x[i]) for i in range(x.shape[0])])
+                near_trajectories_indicices = torch.nonzero(sims > 0.5).flatten()
+                trajectories_near_trajectories_indicices.append(near_trajectories_indicices.tolist())
+        else:
+            for trajectory_idx in tqdm(range(dataset_trajectories.shape[0]), desc='Finding near trajectories'):
+                t = dataset_trajectories[trajectory_idx, ::100, :2].to(device)
+                x = dataset_trajectories[:, ::100, :2].reshape(-1, 2).to(device)
+                distance_to_trajectory = (x[:, None] - t[None]).pow(2).sum(-1).reshape(dataset_trajectories.shape[0], -1, t.shape[0]).min(dim=-1).values.sum(dim=-1)
+                distance_to_trajectory = distance_to_trajectory.cpu()
+                near_trajectories_indicices = torch.nonzero(distance_to_trajectory < 10).flatten()
+                trajectories_near_trajectories_indicices.append(near_trajectories_indicices.tolist())
+    
        
     # Training ####################################################################################
 
@@ -486,7 +518,11 @@ def main(args):
     for i in tqdm(range(args.training_epochs)):
         
         if args.use_value_function:
-            batch = get_iql_training_data(batch_size=args.batch_size, num_states=args.num_states, num_trajectory_states=200)
+            batch = get_iql_training_data(
+                args=args,
+                batch_size=args.batch_size, num_states=args.num_states, num_trajectory_states=200, 
+                trajectories_near_trajectories_indicices=trajectories_near_trajectories_indicices
+            )
         else:
             batch = get_training_data_0(batch_size=args.batch_size, num_states=1001, num_trajectory_states=200)
 
@@ -554,7 +590,14 @@ def main(args):
             
     # Evaluation ####################################################################################      
             
-    eval_batch = get_iql_training_data(batch_size=1, num_states=512, num_trajectory_states=200, trajectory_indicies=torch.arange(0, args.num_evals))
+    eval_batch = get_iql_training_data(
+        args=args,
+        batch_size=1, 
+        num_states=512, 
+        num_trajectory_states=200, 
+        trajectories_near_trajectories_indicices=trajectories_near_trajectories_indicices, 
+        trajectory_indicies=torch.arange(0, args.num_evals)
+    )
 
 
     all_produced_trajectories = []
@@ -612,21 +655,6 @@ def main(args):
     all_produced_trajectories = np.array(all_produced_trajectories)
 
 
-
-    def iou_similarity(traj1, traj2, grid_size=2):
-        traj1 = (np.array(traj1[..., :2]) / grid_size).astype(int)
-        traj2 = (np.array(traj2[..., :2]) / grid_size).astype(int)
-
-        set1 = set(map(tuple, traj1))
-        set2 = set(map(tuple, traj2))
-
-        intersection = len(set1 & set2)
-        union = len(set1 | set2)
-
-        return intersection / union if union > 0 else 0.0
-
-
-
     num_evals = all_produced_trajectories.shape[0] // args.num_eval_seeds
 
     sims = []
@@ -656,7 +684,9 @@ def get_args():
     # Training parameters
     parser.add_argument('--use_value_function', action='store_true', default=False,
                         help='Whether to use value function')
-    parser.add_argument('--training_epochs', type=int, default=10000,
+    parser.add_argument('--use_iou_similarity', action='store_true', default=False,
+                        help='Whether to use iou_similiarity to find similar trajectories')
+    parser.add_argument('--training_epochs', type=int, default=100000,
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=128,
                         help='Batch size for training')

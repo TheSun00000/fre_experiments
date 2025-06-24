@@ -24,4 +24,4 @@ nvidia-smi
 ls /usr/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
-python offline_vae.py --use_value_function --use_iou_similarity --training_epochs 20000 --num_states 10000
+python offline_rg_with_mask.py
