@@ -603,7 +603,7 @@ class RewardGenerator:
         }
         
     
-    def get_z_from_random_anchors(self, batch_size: int, min_num_anchors:int, max_num_anchors:int, anchors_from_same_trajectory=True):
+    def get_z_from_random_anchors(self, batch_size: int, min_num_anchors:int, max_num_anchors:int, anchors_from_same_trajectory=True, mask=None):
         self.fre_network.eval()
         
         (anchors, anchors_rewards, pad_mask), info = self.get_training_data(
@@ -617,7 +617,16 @@ class RewardGenerator:
         anchors = anchors.to(device)
         anchors_rewards = anchors_rewards.to(device)
         pad_mask = pad_mask.to(device)
-
+        
+        if mask is None:
+            mask = self.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.0)
+        
+        assert mask.shape == (batch_size, len(FEATURES_TO_CONSIDER))
+        
+        mask = mask.unsqueeze(1).repeat(1, max_num_anchors, 1)
+        mask = mask.to(device)
+        anchors = anchors * mask
+        
         eval_z, _ = self.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
         
         return eval_z, {
@@ -658,7 +667,7 @@ class RewardGenerator:
 
 
 
-def visualize_rewards_and_trajectories(eval_z, reward_generator, anchors=None, anchors_rewards=None, pad_mask=None, trajectories=None, select_max_trajectory=False,
+def visualize_rewards_and_trajectories(eval_z, reward_generator, anchors=None, anchors_rewards=None, pad_mask=None, mask=None, trajectories=None, select_max_trajectory=False,
                                        mode='', plot_ax=None):
 
     state = dataset_trajectories[0:300, :1000:10].reshape(-1, obs_dim)
@@ -694,7 +703,10 @@ def visualize_rewards_and_trajectories(eval_z, reward_generator, anchors=None, a
         
         zi = eval_z[i].unsqueeze(0).repeat(state.shape[0], 1)
         with torch.no_grad():
-            r = reward_generator.get_reward(state[..., FEATURES_TO_CONSIDER], zi).cpu()
+            x = state[..., FEATURES_TO_CONSIDER]
+            if mask is not None:
+                x = x * mask[i].unsqueeze(0).repeat(state.shape[0], 1).to(device)
+            r = reward_generator.get_reward(x, zi).cpu()
         
         if plot_ax is not None:
             i = plot_ax
@@ -1259,13 +1271,14 @@ def main(args):
     
     MIN_NUM_ANCHORS = args.min_num_anchors
     MAX_NUM_ANCHORS = args.max_num_anchors
+    NUM_ANCHORS_ROBUST = args.num_anchors_robust
     
     
     rg_model = RewardGeneratorTransformer(obs_len=len(FEATURES_TO_CONSIDER))
     # rg_model.load_state_dict(torch.load('models/offline_reward_generator.pth'))
 
 
-    reward_generator_2 = RewardGenerator(
+    reward_generator_masked = RewardGenerator(
         obs_dim=len(FEATURES_TO_CONSIDER),
         fre_network=rg_model,
         min_num_anchors=MIN_NUM_ANCHORS,
@@ -1277,7 +1290,7 @@ def main(args):
     rnd_dataset = dataset_trajectories[..., :2].reshape(-1, 2)
     resampler_losses = resampler.fit(rnd_dataset, epochs=1000)
     resampling_weights = resampler.get_resampling_weights(rnd_dataset, alpha=1.2)
-    reward_generator_2.resampling_weights = resampling_weights
+    reward_generator_masked.resampling_weights = resampling_weights
 
 
     vae_loss, vae_kl_loss = [], []
@@ -1288,7 +1301,7 @@ def main(args):
     print('VAE training...')
     for step in tqdm(range(args.training_epochs), desc='VAE training', leave=False):
         
-        vae_loss_dict = reward_generator_2.train_step_VAE(
+        vae_loss_dict = reward_generator_masked.train_step_VAE(
             args=args,
             batch_size=args.batch_size,
             min_num_anchors=MIN_NUM_ANCHORS,
@@ -1313,13 +1326,124 @@ def main(args):
     
     
     
+    
+    
+    # Training the robust reward representation:
+    
+    rg_model = RewardGeneratorTransformer(obs_len=len(FEATURES_TO_CONSIDER))
+    reward_generator_2 = RewardGenerator(
+        obs_dim=len(FEATURES_TO_CONSIDER),
+        fre_network=rg_model,
+        min_num_anchors=NUM_ANCHORS_ROBUST,
+        max_num_anchors=NUM_ANCHORS_ROBUST,
+        from_buffer=True
+    )
+    reward_generator_2.resampling_weights = resampling_weights
+
+
+    vae_loss_better, vae_kl_loss_better = [], []
+    
+    
+
+    print('Robust VAE training...')
+    for step in tqdm(range(args.training_epochs_robust), desc='Robust VAE training', leave=False):
+        
+        # vae_loss_dict = reward_generator_masked.train_step_VAE(
+            
+        reward_generator_2.fre_network.train()
+        
+        batch_size = 256
+        (anchors, _, pad_mask), _ = reward_generator_2.get_training_data(
+            batch_size=batch_size, 
+            min_num_anchors=NUM_ANCHORS_ROBUST, 
+            max_num_anchors=NUM_ANCHORS_ROBUST,
+            num_states=NUM_ANCHORS_ROBUST+1,
+            from_new_states=False,
+            anchors_from_same_trajectory=False
+        )
+        anchors = anchors.to(device)
+        pad_mask = pad_mask.to(device)
+        
+        # Get rewards from the masked reward generator (to encourage simpler reward functions)
+        with torch.no_grad():
+            mask = reward_generator_masked.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=args.vae_dropout_p)
+            w, _ = reward_generator_masked.get_z_from_random_anchors(batch_size, min_num_anchors=MIN_NUM_ANCHORS, max_num_anchors=MAX_NUM_ANCHORS, anchors_from_same_trajectory=False, mask=mask)
+            mask = mask.unsqueeze(1).repeat(1, NUM_ANCHORS_ROBUST, 1)
+            mask = mask.to(device)
+            x = anchors * mask
+            anchors_rewards = reward_generator_masked.fre_network.get_reward_pred(w, x)
+        
+        
+        w_mean, w_log_std = reward_generator_2.fre_network.get_transformer_encoding(anchors, anchors_rewards, pad_mask=pad_mask)
+        w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
+        
+        rewards_pred = reward_generator_2.fre_network.get_reward_pred(w, anchors)
+        reward_pred_loss = ((rewards_pred[~pad_mask] - anchors_rewards[~pad_mask])**2).mean()
+        
+        kl_loss = -0.5 * (1 + 2*w_log_std - w_mean**2 - torch.exp(w_log_std)**2).mean()
+        loss = reward_pred_loss + kl_loss * 0.01
+        
+        
+        reward_generator_2.optimimizer.zero_grad()
+        loss.backward()
+        reward_generator_2.optimimizer.step()
+        
+            
+        vae_loss_better.append(loss.item())
+        vae_kl_loss_better.append(kl_loss.item())   
+        
+        if step % 100 == 0:
+            clear_output(True)
+            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+            axs[0].plot(vae_loss_better)
+            axs[0].set_xscale('log')
+            axs[0].set_ylim([0, 0.5])
+            axs[1].plot(vae_kl_loss_better)
+            axs[1].set_ylim([0, 1])
+            plt.savefig(f"{LOGS_FOLDER}/vae_loss_robust.png")
+            
+            
+    # break
+
+    
+    
+    # Generate a random reward function with feature masking:    
+    
     eval_num_envs = 16
-    eval_z, info = reward_generator_2.get_z_from_random_anchors(eval_num_envs, min_num_anchors=MIN_NUM_ANCHORS, max_num_anchors=MAX_NUM_ANCHORS, anchors_from_same_trajectory=False)
 
-    anchors, anchors_rewards, pad_mask = info['anchors'], info['anchors_rewards'], info['pad_mask']
-
-    fig, axs = visualize_rewards_and_trajectories(eval_z, reward_generator_2, anchors, anchors_rewards, pad_mask, mode='pos')
+    mask = reward_generator_masked.generate_boolean_mask(eval_num_envs, len(FEATURES_TO_CONSIDER), p=0.0)
+    mask = torch.zeros_like(mask)
+    mask[..., [0, 1]] = 1.
+    with torch.no_grad():
+        eval_w, _ = reward_generator_masked.get_z_from_random_anchors(eval_num_envs, min_num_anchors=MIN_NUM_ANCHORS, max_num_anchors=MAX_NUM_ANCHORS, anchors_from_same_trajectory=False, mask=mask)
+        
+    fig, axs = visualize_rewards_and_trajectories(eval_w, reward_generator_masked, mask=mask)
     plt.savefig(f"{LOGS_FOLDER}/Random rewards.png")
+    
+    
+    # Reconstruct the reward function:
+    
+    (anchors, _, pad_mask), _ = reward_generator_2.get_training_data(
+        batch_size=eval_num_envs, 
+        min_num_anchors=NUM_ANCHORS_ROBUST, 
+        max_num_anchors=NUM_ANCHORS_ROBUST,
+        num_states=NUM_ANCHORS_ROBUST,
+        from_new_states=False,
+        anchors_from_same_trajectory=False
+    )
+    anchors = anchors.to(device)
+    pad_mask = pad_mask.to(device)
+
+    # Get rewards from the masked reward generator (to encourage simpler reward functions)
+    with torch.no_grad():
+        x = anchors * mask.unsqueeze(1).repeat(1, 64, 1).to(device)
+        anchors_rewards = reward_generator_masked.fre_network.get_reward_pred(eval_w, x)
+
+
+    w_mean, _ = reward_generator_2.fre_network.get_transformer_encoding(anchors, anchors_rewards, pad_mask=pad_mask)
+
+    fig, axs = visualize_rewards_and_trajectories(w_mean, reward_generator_2, anchors.cpu(), anchors_rewards.cpu(), pad_mask.cpu(), mask=mask.cpu())
+    plt.savefig(f"{LOGS_FOLDER}/Random rewards without mask.png")
     
     ################################################################################################
     
@@ -1406,12 +1530,16 @@ def get_args():
 
     # Training parameters
     
-    parser.add_argument('--training_epochs', type=int, default=100000, help='Number of training vae epochs')
+    parser.add_argument('--training_epochs', type=int, default=100_000, help='Number of training vae epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for vae training')
     parser.add_argument('--min_num_anchors', type=int, default=4)
     parser.add_argument('--max_num_anchors', type=int, default=8)
     parser.add_argument('--num_eval_anchors', type=int, default=256)
     parser.add_argument('--vae_dropout_p', type=int, default=0.3)
+    
+    parser.add_argument('--training_epochs_robust', type=int, default=100_000)
+    parser.add_argument('--num_anchors_robust', type=int, default=64)
+    
     
     parser.add_argument('--num_states', type=int, default=1024,
                         help='Number of sampled states')
