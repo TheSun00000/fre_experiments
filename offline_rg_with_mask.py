@@ -538,7 +538,7 @@ class RewardGenerator:
             cols = torch.randint(0, length, (rows.size(0),))
             vecs[rows, cols] = True
         # vecs = torch.ones_like(vecs)
-        vecs[:, :2] = True
+        # vecs[:, :2] = True
         return vecs * 1.
     
         
@@ -1537,8 +1537,8 @@ def get_args():
     parser.add_argument('--num_eval_anchors', type=int, default=256)
     parser.add_argument('--vae_dropout_p', type=int, default=0.3)
     
-    parser.add_argument('--training_epochs_robust', type=int, default=100_000)
-    parser.add_argument('--num_anchors_robust', type=int, default=64)
+    parser.add_argument('--training_epochs_re', type=int, default=100_000)
+    parser.add_argument('--num_anchors_re', type=int, default=64)
     
     
     parser.add_argument('--num_states', type=int, default=1024,
