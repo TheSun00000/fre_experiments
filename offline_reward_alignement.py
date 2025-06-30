@@ -800,7 +800,7 @@ def run_test(benchmark_id, num_evals, num_eval_anchors, frenetwork, reward_encod
 
         produced_trajectory = []
 
-        for step in tqdm(range(10)):
+        for step in tqdm(range(2000)):
             
             produced_trajectory.append(state)
             
@@ -966,7 +966,7 @@ def main(args):
     eval_num_envs = 16
     num_anchors = 16
 
-    mask = reward_generator.generate_boolean_mask(args, eval_num_envs, len(FEATURES_TO_CONSIDER), p=1.0)
+    mask = reward_generator.generate_boolean_mask(args, eval_num_envs, len(FEATURES_TO_CONSIDER), p=0.0)
     mask = torch.zeros_like(mask)
     mask[..., [0, 1]] = 1.
     with torch.no_grad():
@@ -1007,7 +1007,7 @@ def main(args):
         
         # get a random reward function from the reward generator:
         with torch.no_grad():
-            mask = reward_generator.generate_boolean_mask(args, re_batch_size, len(FEATURES_TO_CONSIDER), p=1.0)
+            mask = reward_generator.generate_boolean_mask(args, re_batch_size, len(FEATURES_TO_CONSIDER), p=args.vae_dropout_p)
             if args.keep_only_coords:
                 mask = torch.zeros_like(mask)
                 mask[:, [0, 1]] = 1.
@@ -1055,8 +1055,9 @@ def main(args):
         
         if epoch % 10 == 0:
             clear_output(True)
-            plt.plot(reward_encoder_loss)
-            plt.xscale('log')
+            fig, ax = plt.subplots(1, 1, figsize=(5, 4))
+            ax.plot(reward_encoder_loss)
+            ax.set_xscale('log')
             plt.savefig(f"{LOGS_FOLDER}/reward_alignement_loss.png")
             
         if i % 1000 == 0:
@@ -1082,7 +1083,7 @@ def main(args):
         print(benchmark_test_label)
 
         reward_z_list, start_states_list, produced_trajectories_list, best_trajectories_idx_list, best_trajectories_bench_idx_list, best_trajectories_from_alignement, info = run_test(
-            benchmark_id, num_evals=1, num_eval_anchors=args.num_random_samples, 
+            benchmark_id, num_evals=5, num_eval_anchors=args.num_random_samples, 
             frenetwork=frenetwork, reward_encoder=reward_encoder, reward_generator=reward_generator, pre_computed_zs=pre_computed_zs
         )
 
@@ -1197,15 +1198,14 @@ def get_args():
     
     parser.add_argument('--training_epochs', type=int, default=100_000, help='Number of training vae epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for vae training')
-    parser.add_argument('--min_num_anchors', type=int, default=4)
-    parser.add_argument('--max_num_anchors', type=int, default=8)
-    parser.add_argument('--num_eval_anchors', type=int, default=256)
-    parser.add_argument('--vae_dropout_p', type=int, default=0.3)
+    parser.add_argument('--min_num_anchors', type=int, default=16)
+    parser.add_argument('--max_num_anchors', type=int, default=16)
+    parser.add_argument('--vae_dropout_p', type=int, default=0.5)
     
-    parser.add_argument('--training_epochs_re', type=int, default=100_000)
-    parser.add_argument('--num_anchors_robust', type=int, default=64)
-    parser.add_argument('--re_batch_size', type=int, default=64)
+    parser.add_argument('--training_epochs_re', type=int, default=10_000)
+    parser.add_argument('--re_batch_size', type=int, default=32)
     parser.add_argument('--num_random_samples', type=int, default=200)
+    parser.add_argument('--num_anchors_robust', type=int, default=64)
     
     
     
