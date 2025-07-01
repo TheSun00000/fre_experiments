@@ -386,34 +386,34 @@ def sample_reward_function_fre(batch_size, num_random_samples):
     random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
     random_states = random_states.reshape(batch_size, num_random_samples, len(FEATURES_TO_CONSIDER)).to(device)
 
-    reward_latent = torch.zeros((batch_size, 128))
+    reward_params = torch.zeros((batch_size, 128))
     random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
     for b in range(batch_size):
         reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
         
-        reward_latent[b, 0] = reward_type
+        reward_params[b, 0] = reward_type
         if reward_type == 0:
             goal = goal_rewards.sample_goals(1)
             goal = goal.repeat(1, 1)
             r, param_id = goal_rewards(random_states[[b]], goals=goal)    
-            reward_latent[b, 1:1+obs_dim] = param_id
+            reward_params[b, 1:1+obs_dim] = param_id
             random_states[b, 0] = goal
             r[0, 0] = 1.
             
         elif reward_type == 1:
             param_id = linear_rewards.sample(1).unsqueeze(0)
             r, param_id = linear_rewards(random_states[[b]], param_id)
-            reward_latent[b, 1] = param_id
+            reward_params[b, 1] = param_id
             
         elif reward_type == 2:
             param_id = mlp_rewards.sample(1).unsqueeze(0)
             r, param_id = mlp_rewards(random_states[[b]], param_id) 
-            reward_latent[b, 1] = param_id
+            reward_params[b, 1] = param_id
             
         random_states_rewards[b] = r
         
-    return reward_latent, random_states, random_states_rewards
+    return reward_params, random_states, random_states_rewards
 
 
 
@@ -591,22 +591,25 @@ class Actor(nn.Module):
 
 
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import copy
 
 class IQL(nn.Module):
-    def __init__(self, state_dim, action_dim, w_dim=128):
+    def __init__(self, state_dim, action_dim, args, w_dim=128):
         super(IQL, self).__init__()
         self.obs_len = state_dim
                 
-        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512, 512])
-        self.target_critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512, 512])
+        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.target_critic = copy.deepcopy(self.critic)
+        for param in self.target_critic.parameters():
+            param.requires_grad = False
         
-        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512, 512])        
-        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512, 512])
+        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[256, 256])        
+        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
         
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
         self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=0.003)
-        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, 1_000_000)
+        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, args.iql_training_steps)
         
         
     def get_value(self, w, obs):
@@ -619,7 +622,7 @@ class IQL(nn.Module):
     
     def get_target_critic(self, w, obs, actions):
         w_and_obs = torch.concatenate([w, obs], dim=-1)
-        return self.critic(w_and_obs, actions)
+        return self.target_critic(w_and_obs, actions)
 
     def get_actor(self, w, obs, temperature=1.0):
         w_and_obs = torch.concatenate([w, obs], dim=-1)
@@ -674,6 +677,8 @@ def get_iql_training_data(batch_size, num_states):
         'actions': actions.to(device),
         'next_states': next_states.to(device),
         'masks': masks.to(device),
+        'trajectory_idx': trajectory_idx.reshape(batch_size, num_states),
+        'state_idx': state_idx.reshape(batch_size, num_states)
     }
 
 
@@ -745,71 +750,73 @@ def run_test(fre_network, iql_agent, benchmark_id, num_evals, num_eval_anchors):
 
     benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
 
-
-    reward_latent, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
-    encode_obs = random_states[:, :128, :].to(device)
-
-    # encode_rewards = random_states_rewards[:, :128, None].to(device)
-    # decode_rewards = random_states_rewards[:, 128:, None].to(device)
-
-    benchmark_id = 0
-    encode_rewards = benchmark_reward_function(encode_obs.cpu(), benchmark_param).unsqueeze(-1).to(device)
-
-    reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
-
-    with torch.no_grad():
-        w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)  
+    produced_trajectories = []
+    for _ in range(num_evals):
         
-        
-        
-    env.reset()
-    # location = np.array(env.unwrapped._wrapped_env._get_reset_location())
-    location = (20, 15)
-    start_state = reset_to_location(env, location)
-    start_state = normalize_dataset_coords(start_state)[..., :]
-    state = start_state
 
-    tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
-    
-    
-    
-    produced_trajectory = []
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
+        encode_obs = random_states[:, :128, :].to(device)
 
-    for step in tqdm(range(10)):
-        
-        produced_trajectory.append(state)
-        
+        # encode_rewards = random_states_rewards[:, :128, None].to(device)
+        # decode_rewards = random_states_rewards[:, 128:, None].to(device)
+
+        encode_rewards = benchmark_reward_function(encode_obs.cpu(), benchmark_param).unsqueeze(-1).to(device)
+
+        reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
+
         with torch.no_grad():
-            tensor_state = torch.tensor(state).reshape(1, -1).to(device).float()
-            dist = iql_agent.get_actor(w_mean, tensor_state)
-            action = dist.loc.cpu()
-            action = np.array(action[0]).clip(-1, 1)
-
+            w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)  
             
-        new_state, _, _, _ = env.step(action)
-        
-        state = normalize_dataset_coords(new_state)[..., :]
-        
-    produced_trajectory = np.stack(produced_trajectory)
+            
+            
+        env.reset()
+        location = (20, 15)
+        start_state = reset_to_location(env, location)
+        start_state = normalize_dataset_coords(start_state)[..., :]
+        state = start_state
+
+        tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
     
-    return produced_trajectory, w_mean
+    
+        produced_trajectory = []    
+
+        for step in tqdm(range(2000)):
+            
+            produced_trajectory.append(state)
+            
+            with torch.no_grad():
+                tensor_state = torch.tensor(state).reshape(1, -1).to(device).float()
+                dist = iql_agent.get_actor(w_mean, tensor_state)
+                action = dist.loc.cpu()
+                action = np.array(action[0]).clip(-1, 1)
+
+                
+            new_state, _, _, _ = env.step(action)
+            
+            state = normalize_dataset_coords(new_state)[..., :]
+            
+        produced_trajectory = np.stack(produced_trajectory)
+        produced_trajectories.append(produced_trajectory)
+    
+    produced_trajectories = np.stack(produced_trajectories)
+
+    return produced_trajectories, w_mean
 
 
-# [457]:
-
-
-
-# [ ]:
 
 
 def run_benchmark(fre_network, iql_agent, steps):
     fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
 
+    
+    all_produced_trajectories = []
+    
     for benchmark_id in range(len(benchmarks)):
 
         benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
+        print(benchmark_test_label)
         
-        produced_trajectory, w_mean = run_test(fre_network, iql_agent, benchmark_id=benchmark_id, num_evals=1, num_eval_anchors=128)
+        produced_trajectory, w_mean = run_test(fre_network, iql_agent, benchmark_id=benchmark_id, num_evals=5, num_eval_anchors=128)
         
 
         eval_states, eval_rewards = get_eval_rewards(fre_network, w_mean)
@@ -817,7 +824,7 @@ def run_benchmark(fre_network, iql_agent, steps):
 
         axs[benchmark_id, 0].scatter(eval_states[..., 0], eval_states[..., 1], c=real_eval_rewards)
         axs[benchmark_id, 1].scatter(eval_states[..., 0], eval_states[..., 1], c=eval_rewards)
-        axs[benchmark_id, 2].scatter(produced_trajectory[:, 0], produced_trajectory[:, 1], c='red')
+        axs[benchmark_id, 2].scatter(produced_trajectory[..., 0], produced_trajectory[..., 1], c='red', s=5)
         
         add_largest_maze_walls(axs[benchmark_id, 0])
         add_largest_maze_walls(axs[benchmark_id, 1])
@@ -828,9 +835,69 @@ def run_benchmark(fre_network, iql_agent, steps):
         axs[benchmark_id, 1].set_title(f'Reconstructed Reward Function')
         axs[benchmark_id, 2].set_title(f'Agent Trajectory')
         
+        all_produced_trajectories.append(produced_trajectory)
+    
         
+    np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)    
     plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
+
+
+
+
+def get_G_s(batch, reward_params):
+
+    gamma = 0.99
+
+    batch_size = reward_params.shape[0]
+
+    discounted_sum_per_step_list = []
+    G_s = torch.zeros(batch['states'].shape[:2], device=device)
+
+    for b in range(batch_size):
+
+        param = reward_params[b]
+
+        trajectory_idx = torch.unique(batch['trajectory_idx'][b]).unsqueeze(-1)
+        state_idx = torch.arange(len_trajectory)
+        x = dataset_trajectories_cuda[trajectory_idx, state_idx]
+
+        if (param[0] == 2):
+            rewards, _ = mlp_rewards(
+                obs=x, 
+                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
+            )
+        elif (param[0] == 1):
+            rewards, _ = linear_rewards(
+                obs=x, 
+                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
+            )
+        elif (param[0] == 0):
+            # print('pipipopo')
+            rewards, _ = goal_rewards(
+                obs=x,
+                goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1)
+            )
+            
+
+        discounts = gamma ** torch.arange(len_trajectory, device=rewards.device).unsqueeze(0)
+        discounted_rewards = rewards * discounts
+        reversed_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_rewards, dims=[1]), dim=1), dims=[1])
+        discounted_sum_per_step = reversed_cumsum / discounts
+        
+        
+        discounted_sum_per_step_list.append(discounted_sum_per_step)
+        
+        abs_trajectory_idx = batch['trajectory_idx'][b]
+        abs_state_idx = batch['state_idx'][b]
+        
+        abs_to_relative_idx_map = {n:i for i, n in enumerate(trajectory_idx.reshape(-1).tolist())}
+        relative_trajectory_idx = [abs_to_relative_idx_map[n] for n in abs_trajectory_idx.tolist()]
+        
+        G_s[b] = discounted_sum_per_step[relative_trajectory_idx, abs_state_idx]
+        
+    return G_s.unsqueeze(-1), {'discounted_sum_per_step':discounted_sum_per_step_list}
+
 
 
 def main(args):
@@ -852,7 +919,7 @@ def main(args):
 
     for i in tqdm(range(0)):
         
-        reward_latent, random_states, random_states_rewards = sample_reward_function_fre(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
         
         encode_obs = random_states[:, :num_encode_states, :].to(device)
         decode_obs = random_states[:, num_encode_states:, :].to(device)
@@ -899,7 +966,7 @@ def main(args):
     
     num_eval_states = 10_000
 
-    reward_latent, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=(128+num_eval_states))
+    reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=(128+num_eval_states))
 
     encode_obs = random_states[:, :128, :].to(device)
     decode_obs = random_states[:, 128:, :].to(device)
@@ -941,7 +1008,7 @@ def main(args):
 
 
         
-    iql_agent = IQL(state_dim=obs_dim, action_dim=8).to(device)
+    iql_agent = IQL(state_dim=obs_dim, action_dim=8, args=args).to(device)
 
     actor_losses = []
     v_losses, q_losses = [], []
@@ -956,17 +1023,17 @@ def main(args):
         'expectile': 0.8,
         'temperature': 3.0,
         'discount': 0.99,
-        'tau': 0.001,
+        'tau': 0.005,
     }
 
-    iql_batch_size = 32
+    iql_batch_size = 64
     iql_num_states = 512
 
 
-    for timestep in tqdm(range(args.iql_training_steps)):
+    for timestep in tqdm(range(1, args.iql_training_steps+1)):
 
         
-        reward_latent, random_states, random_states_rewards = sample_reward_function_fre(batch_size=iql_batch_size, num_random_samples=128)
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=iql_batch_size, num_random_samples=128)
         encode_obs = random_states[:, :128, :].to(device)
         encode_rewards = random_states_rewards[:, :128, None].to(device)
         reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
@@ -976,6 +1043,10 @@ def main(args):
             batch_size=iql_batch_size, 
             num_states=iql_num_states
         )
+        
+        if args.use_value_ground_truth:
+            G_s, get_G_s_info = get_G_s(batch, reward_params)
+            batch['G_s'] = G_s.to(device)
         
         with torch.no_grad():
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)   
@@ -997,11 +1068,16 @@ def main(args):
         # Value Loss: Update V towards expectile of min(q1, q2).
         
         v = iql_agent.get_value(w_target, batch['states'])
-        adv = target_q - v
-        v_loss = expectile_loss(adv, target_q - v, config['expectile'])
+        
+        if args.use_value_ground_truth:
+            adv = batch['G_s'] - v
+        else:
+            adv = target_q - v
+            
+        v_loss = expectile_loss(adv, adv, config['expectile'])
         v_loss = v_loss.mean()
 
-        iql_agent.value.zero_grad()
+        iql_agent.value.zero_grad(set_to_none=True)
         v_loss.backward()
         iql_agent.value_optim.step()
 
@@ -1009,10 +1085,9 @@ def main(args):
         targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
 
         q1, q2 = iql_agent.get_critic(w_target, batch['states'], batch['actions'])
-        q_loss = ((q1 - targets) ** 2 + (q2 - targets) ** 2) / 2
-        q_loss = q_loss.mean()
+        q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
         
-        iql_agent.critic.zero_grad()
+        iql_agent.critic.zero_grad(set_to_none=True)
         q_loss.backward()
         iql_agent.critic_optim.step()
 
@@ -1030,22 +1105,12 @@ def main(args):
         # Actor Loss ############################################
 
 
-        v = iql_agent.get_value(w_target, batch['states']).detach()
-        q1, q2 = iql_agent.get_critic(w_target, batch['states'], batch['actions'])
-        q1, q2 = q1.detach(), q2.detach()
-        q = torch.minimum(q1, q2)
-        adv = q - v
-
+        adv = (target_q - v).detach()
         actions = batch['actions']
-        exp_a = torch.exp(adv * config['temperature'])
-        exp_a = torch.minimum(exp_a, torch.tensor(100.0))
-        # exp_a = torch.ones_like(exp_a)
+        exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
         
         dist = iql_agent.get_actor(w_target, batch['states'])
-        # log_probs = dist.log_prob(actions)
-        log_probs = dist.log_prob(actions).sum(axis=-1, keepdim=True)
-        assert exp_a.shape == log_probs.shape
-        # print("Log probs shape", log_probs.shape)
+        log_probs = dist.log_prob(actions)
         actor_loss = -(exp_a * log_probs).mean()
 
         std = dist.stddev.mean()
@@ -1054,10 +1119,10 @@ def main(args):
         # diff = ((dist.loc - batch['actions'])**2).sum(-1, keepdim=True)
         # actor_loss = (exp_a * diff).mean()
         
-        iql_agent.actor.zero_grad()
+        iql_agent.actor.zero_grad(set_to_none=True)
         actor_loss.backward()
         iql_agent.actor_optim.step()
-        # iql_agent.actor_lr_schedule.step()
+        iql_agent.actor_lr_schedule.step()
         
         actor_info = {
             'actor_loss': actor_loss,
@@ -1087,7 +1152,7 @@ def main(args):
             clear_output(True)
             fig, axs = plt.subplots(1, 5, figsize=(30, 5))
             axs[0].plot(smooth_and_downsample(actor_losses))
-            # axs[0].set_ylim(0,50)
+            axs[0].set_ylim(0,max(actor_losses[-100:]))
             axs[0].set_title("Actor Loss")
             
             axs[1].plot(smooth_and_downsample(v_losses))
@@ -1108,8 +1173,11 @@ def main(args):
             plt.savefig(f"{args.LOGS_FOLDER}/iql_training_losses.png")
             plt.close()
             
-        if timestep % 5000 == 0:
+        if timestep % (args.iql_training_steps // 5) == 0:
             run_benchmark(fre_network, iql_agent, steps=timestep)
+            
+        if timestep % (args.iql_training_steps // 5) == 0:
+            torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
     
     
     ################################################################################################################
@@ -1131,7 +1199,8 @@ from datetime import datetime
 
 def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
-    parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')        
+    parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')
+    parser.add_argument('--use_value_ground_truth', action='store_true', default=False)      
     return parser.parse_args()
 
 
@@ -1145,7 +1214,11 @@ if __name__ == "__main__":
         
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+    
     exp_name = f'fre_iql'
+    if args.use_value_ground_truth:
+        exp_name = f'fre_iql:use_value_ground_truth'
+        
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
 
