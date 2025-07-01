@@ -63,7 +63,7 @@ class SimplexRewardFunction:
         rews += xy_vels[...,0] * simplex_xvel + xy_vels[...,1] * simplex_yvel
         # rews = (simplex > 0.3).float()
         
-        rews = ((rews + 1) * 2).clip(-1, 1)
+        # rews = ((rews + 1) * 2).clip(-1, 1)
         
         return rews # (batch_size,) 
     
