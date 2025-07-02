@@ -838,6 +838,32 @@ def run_benchmark(fre_network, iql_agent, steps):
     np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)    
     plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
+    
+    
+    all_produced_trajectories = np.stack(all_produced_trajectories)
+    
+    
+    
+    for benchmark_id in range(len(benchmarks)):
+
+        benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
+        
+
+        trajectory_states = torch.tensor(all_produced_trajectories[benchmark_id]).reshape(1, -1, 29)
+        trajectory_states_rewards = benchmark_reward_function(trajectory_states, benchmark_param).float()
+        trajectory_states_rewards = trajectory_states_rewards.reshape(
+            all_produced_trajectories.shape[1],
+            all_produced_trajectories.shape[2],
+        )
+        trajectory_rewards = trajectory_states_rewards.sum(dim=-1)
+        
+        if 'goal' in benchmark_test_label: 
+            trajectory_rewards = torch.where(trajectory_rewards != -all_produced_trajectories.shape[2], 1., 0.)
+            
+        print(benchmark_test_label, ':')
+        print('\tRewards:', trajectory_rewards.tolist())
+        print('\tmean:', trajectory_rewards.mean().item())
+        print('\tstd:', trajectory_rewards.std().item())
 
 
 
