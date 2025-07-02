@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# [1]:
+
 
 
 import torch
@@ -20,7 +20,16 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 device
 
 
-# [2]:
+def fix_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    print(f'Seed: {seed}')
+
+
+fix_seed(random.randint(0, 10000))
+
+
 
 
 TRAJECTORY_LEN = 1001
@@ -31,7 +40,7 @@ FEATURES_TO_CONSIDER = torch.arange(29)
 KEEP_ONLY_COORDS = True
 
 
-# [3]:
+
 
 
 def reset_to_location(env, location):
@@ -43,7 +52,7 @@ def reset_to_location(env, location):
     return env.unwrapped._get_obs()
 
 
-# [4]:
+
 
 
 import gym
@@ -54,7 +63,7 @@ env = gym.make('antmaze-large-diverse-v2')
 dataset = env.get_dataset()
 
 
-# [189]:
+
 
 
 dataset_trajectories = torch.tensor(dataset['observations'])
@@ -69,8 +78,6 @@ dataset_goals = torch.tensor(dataset['infos/goal'])
 
 
 
-# [:999*1001]
-
 dataset_trajectories = dataset_trajectories[:999*1001].reshape(-1, 1001, STATE_DIM)
 dataset_actions = dataset_actions[:999*1001].reshape(-1, 1001, 8)
 dataset_terminals = dataset_terminals[:999*1001]
@@ -80,7 +87,7 @@ dataset_timeouts = dataset_timeouts[:999*1001].reshape(-1, 1001)
 num_trajectories, len_trajectory, obs_dim = dataset_trajectories.shape
 
 
-# [6]:
+
 
 
 dataset_mean = dataset_trajectories.mean([0, 1])
@@ -115,7 +122,7 @@ dataset_trajectories = normalize_dataset_coords(dataset_trajectories)
 dataset_trajectories_cuda = dataset_trajectories.to(device)
 
 
-# [7]:
+
 
 
 
@@ -143,7 +150,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-# [8]:
+
 
 
 class FRENetwork(nn.Module):
@@ -232,7 +239,7 @@ class FRENetwork(nn.Module):
 
 # # FRE:
 
-# [9]:
+
 
 class MLPRewards:
     def __init__(self, N, obs_len):
@@ -280,7 +287,7 @@ class MLPRewards:
     
 # mlp_rewards = MLPRewards(N=10000, obs_len=29)
 
-# [10]:
+
 class LinearRewards:
     def __init__(self, N, obs_len):
 
@@ -365,7 +372,7 @@ class GoalRewards:
         return r, goals
 
 
-# [12]:
+
 
 
 linear_rewards = LinearRewards(N=10000, obs_len=29)
@@ -373,7 +380,7 @@ mlp_rewards = MLPRewards(N=10000, obs_len=29)
 goal_rewards = GoalRewards()
 
 
-# [13]:
+
 
 
 def sample_reward_function_fre(batch_size, num_random_samples):
@@ -637,7 +644,7 @@ def update_target_critic(critic, target_critic, tau):
 
     target_critic.load_state_dict(target_critic_state_dict)
     
-
+    
 def expectile_loss(u, expectile=0.7):
     weight = torch.where(
         u.detach() >= 0, 
@@ -656,7 +663,7 @@ def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
     return smoothed[::downsample]
 
 
-# [211]:
+
 
 
 def get_iql_training_data(batch_size, num_states):
@@ -677,6 +684,102 @@ def get_iql_training_data(batch_size, num_states):
         'trajectory_idx': trajectory_idx.reshape(batch_size, num_states),
         'state_idx': state_idx.reshape(batch_size, num_states)
     }
+
+
+
+def get_iql_training_data_with_G(batch_size, num_states, reward_params, ratio):
+    assert batch_size == reward_params.shape[0]
+    num_considered_states = 100
+    gamma = 0.99
+
+
+    states = torch.zeros((batch_size, num_states, obs_dim), device=device)
+    next_states = torch.zeros((batch_size, num_states, obs_dim), device=device)
+    actions = torch.zeros((batch_size, num_states, 8), device=device)
+    masks = torch.zeros((batch_size, num_states, 1), device=device)
+    G_s = torch.zeros((batch_size, num_states, 1), device=device)
+
+    # Find the top_k trajectory, and 
+    
+    top_k_num_states = int(num_states * ratio)
+    num_radom_states = num_states - top_k_num_states
+    
+    if ratio != 0:
+        
+        for b in range(batch_size):
+            # Find the top trajectories:
+            param = reward_params[b]
+
+            state_idx = torch.linspace(0, len_trajectory-1, num_considered_states).long()
+            x = dataset_trajectories_cuda[:, state_idx]
+
+            if (param[0] == 2):
+                rewards, _ = mlp_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
+            elif (param[0] == 1):
+                rewards, _ = linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
+            elif (param[0] == 0):
+                rewards, _ = goal_rewards(obs=x, goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1))
+                
+            cum_rewards = rewards.sum(dim=1)
+
+            sorted_trajectories_idx = cum_rewards.argsort(descending=True)
+            sorted_cum_rewards = cum_rewards[sorted_trajectories_idx]
+
+            top_k = 50
+            top_k_trajectories_idx = sorted_trajectories_idx[:top_k].cpu()
+
+
+            # Calculate the discounted cumulative reward G(s) for each state from the top trajectories
+
+            top_k_trajectories = dataset_trajectories_cuda[top_k_trajectories_idx]
+
+            if (param[0] == 2):
+                rewards, _ = mlp_rewards(obs=top_k_trajectories, param_id=param[1].reshape(1, 1).repeat(top_k_trajectories.shape[0], 1).long())
+            elif (param[0] == 1):
+                rewards, _ = linear_rewards(obs=top_k_trajectories, param_id=param[1].reshape(1, 1).repeat(top_k_trajectories.shape[0], 1).long())
+            elif (param[0] == 0):
+                rewards, _ = goal_rewards(obs=top_k_trajectories, goals=param[1:obs_dim+1].unsqueeze(0).repeat(top_k_trajectories.shape[0], 1))
+                
+
+            discounts = gamma ** torch.arange(len_trajectory, device=rewards.device).unsqueeze(0)
+            discounted_rewards = rewards * discounts
+            reversed_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_rewards, dims=[1]), dim=1), dims=[1])
+            discounted_sum_per_step = reversed_cumsum / discounts
+
+
+            # Select 50% of the states from the top trajectories:
+
+            top_k_t_idx = torch.randint(0, top_k, (top_k_num_states,))
+            top_k_s_idx = torch.randint(0, len_trajectory-1, (top_k_num_states,))
+
+            states[b, :top_k_num_states] = top_k_trajectories[top_k_t_idx, top_k_s_idx]
+            next_states[b, :top_k_num_states] = top_k_trajectories[top_k_t_idx, top_k_s_idx+1]
+            actions[b, :top_k_num_states] = dataset_actions[top_k_trajectories_idx][top_k_t_idx, top_k_s_idx]
+            masks[b, :top_k_num_states] = ~dataset_timeouts[top_k_trajectories_idx][top_k_t_idx, top_k_s_idx+1].unsqueeze(-1)
+            G_s[b, :top_k_num_states] = discounted_sum_per_step[top_k_t_idx, top_k_s_idx].unsqueeze(-1)
+
+
+        # Select the remaining 50% states randomly:
+
+
+    trajectory_idx = torch.randint(0, num_trajectories, (batch_size*num_radom_states,))
+    state_idx = torch.randint(0, len_trajectory, (batch_size*num_radom_states,)) % 1000
+
+    states[:, top_k_num_states:] = dataset_trajectories[trajectory_idx, state_idx].reshape(batch_size, num_radom_states, obs_dim)
+    next_states[:, top_k_num_states:] = dataset_trajectories[trajectory_idx, state_idx+1].reshape(batch_size, num_radom_states, obs_dim)
+    actions[:, top_k_num_states:] = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, num_radom_states, 8)
+    masks[:, top_k_num_states:] = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, num_radom_states, 1)
+
+    alpha = (G_s != 0).float()
+    
+    return {
+        'states': states.to(device),
+        'actions': actions.to(device),
+        'next_states': next_states.to(device),
+        'masks': masks.to(device),
+        'G_s': G_s.to(device),
+        'alpha': alpha      
+    } 
 
 
 
@@ -834,66 +937,31 @@ def run_benchmark(fre_network, iql_agent, steps):
         
         all_produced_trajectories.append(produced_trajectory)
     
-        
+    
     np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)    
     plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
+    
+    all_produced_trajectories = np.stack(all_produced_trajectories)
+    
+    
+    
+    for benchmark_id in range(len(benchmarks)):
 
+        benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]    
 
+        trajectory_states = torch.tensor(all_produced_trajectories[benchmark_id]).reshape(1, -1, 29)
+        trajectory_states_rewards = benchmark_reward_function(trajectory_states, benchmark_param).float()
+        trajectory_states_rewards = trajectory_states_rewards.reshape(
+            all_produced_trajectories.shape[1],
+            all_produced_trajectories.shape[2],
+        )
+        trajectory_rewards = trajectory_states_rewards.sum(dim=-1)
+        print(benchmark_test_label, ':')
+        print('\tRewards:', trajectory_rewards.tolist())
+        print('\tmean:', trajectory_rewards.mean().item())
+        print('\tstd:', trajectory_rewards.std().item())
 
-
-def get_G_s(batch, reward_params):
-
-    gamma = 0.99
-
-    batch_size = reward_params.shape[0]
-
-    discounted_sum_per_step_list = []
-    G_s = torch.zeros(batch['states'].shape[:2], device=device)
-
-    for b in range(batch_size):
-
-        param = reward_params[b]
-
-        trajectory_idx = torch.unique(batch['trajectory_idx'][b]).unsqueeze(-1)
-        state_idx = torch.arange(len_trajectory)
-        x = dataset_trajectories_cuda[trajectory_idx, state_idx]
-
-        if (param[0] == 2):
-            rewards, _ = mlp_rewards(
-                obs=x, 
-                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
-            )
-        elif (param[0] == 1):
-            rewards, _ = linear_rewards(
-                obs=x, 
-                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
-            )
-        elif (param[0] == 0):
-            # print('pipipopo')
-            rewards, _ = goal_rewards(
-                obs=x,
-                goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1)
-            )
-            
-
-        discounts = gamma ** torch.arange(len_trajectory, device=rewards.device).unsqueeze(0)
-        discounted_rewards = rewards * discounts
-        reversed_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_rewards, dims=[1]), dim=1), dims=[1])
-        discounted_sum_per_step = reversed_cumsum / discounts
-        
-        
-        discounted_sum_per_step_list.append(discounted_sum_per_step)
-        
-        abs_trajectory_idx = batch['trajectory_idx'][b]
-        abs_state_idx = batch['state_idx'][b]
-        
-        abs_to_relative_idx_map = {n:i for i, n in enumerate(trajectory_idx.reshape(-1).tolist())}
-        relative_trajectory_idx = [abs_to_relative_idx_map[n] for n in abs_trajectory_idx.tolist()]
-        
-        G_s[b] = discounted_sum_per_step[relative_trajectory_idx, abs_state_idx]
-        
-    return G_s.unsqueeze(-1), {'discounted_sum_per_step':discounted_sum_per_step_list}
 
 
 
@@ -1023,8 +1091,8 @@ def main(args):
         'tau': 0.005,
     }
 
-    iql_batch_size = 64
-    iql_num_states = 512
+    iql_batch_size = 4
+    iql_num_states = 2048
 
 
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
@@ -1036,14 +1104,13 @@ def main(args):
         reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
         
         
-        batch = get_iql_training_data(
+        batch = get_iql_training_data_with_G(
             batch_size=iql_batch_size, 
-            num_states=iql_num_states
+            num_states=iql_num_states,
+            reward_params=reward_params,
+            ratio=args.optimal_states_ratio
         )
-        
-        if args.use_value_ground_truth:
-            G_s, get_G_s_info = get_G_s(batch, reward_params)
-            batch['G_s'] = G_s.to(device)
+
         
         with torch.no_grad():
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)   
@@ -1065,13 +1132,11 @@ def main(args):
         # Value Loss: Update V towards expectile of min(q1, q2).
         
         v = iql_agent.get_value(w_target, batch['states'])
+        v_loss_G = expectile_loss(batch['G_s'] - v, config['expectile'])
+        v_loss_Q = expectile_loss(target_q - v, config['expectile'])
         
-        if args.use_value_ground_truth:
-            adv = batch['G_s'] - v
-        else:
-            adv = target_q - v
-            
-        v_loss = expectile_loss(adv, config['expectile'])
+        v_loss = batch['alpha'] * v_loss_G + (1 - batch['alpha']) * v_loss_Q
+        
         v_loss = v_loss.mean()
 
         iql_agent.value.zero_grad(set_to_none=True)
@@ -1113,8 +1178,6 @@ def main(args):
         std = dist.stddev.mean()
         mse_error = ((dist.loc - batch['actions'])**2).mean()
         
-        # diff = ((dist.loc - batch['actions'])**2).sum(-1, keepdim=True)
-        # actor_loss = (exp_a * diff).mean()
         
         iql_agent.actor.zero_grad(set_to_none=True)
         actor_loss.backward()
@@ -1196,8 +1259,12 @@ from datetime import datetime
 
 def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
-    parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')
-    parser.add_argument('--use_value_ground_truth', action='store_true', default=False)      
+    parser.add_argument('--iql_training_steps', type=int, default=100_000)
+    parser.add_argument('--optimal_states_ratio', type=float, default=0.5)
+    
+    parser.add_argument('--use_value_ground_truth', action='store_true', default=False)
+    parser.add_argument('--folder_name', type=str, default=False, required=True)    
+        
     return parser.parse_args()
 
 
@@ -1212,9 +1279,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'fre_iql'
-    if args.use_value_ground_truth:
-        exp_name = f'fre_iql:use_value_ground_truth'
+    exp_name = args.folder_name
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
