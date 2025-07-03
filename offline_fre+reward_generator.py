@@ -85,33 +85,22 @@ num_trajectories, len_trajectory, obs_dim = dataset_trajectories.shape
 
 dataset_mean = dataset_trajectories.mean([0, 1])
 dataset_std = dataset_trajectories.std([0, 1])
-
+dataset_std = torch.ones_like(dataset_std)
 
 def normalize_dataset_coords(dataset_, features_to_consider_only=False):
-    return dataset_
+    # return dataset_    
     is_numpy = isinstance(dataset_, np.ndarray)
     if is_numpy: dataset_ = torch.tensor(dataset_)
+    
     dataset = dataset_.clone()
     if not features_to_consider_only:
-        dataset = (dataset - dataset_mean) / dataset_std
+        dataset = (dataset - dataset_mean.to(dataset.device)) / dataset_std.to(dataset.device)
     else:
         dataset = (dataset - dataset_mean[FEATURES_TO_CONSIDER]) / dataset_std[FEATURES_TO_CONSIDER]
     if is_numpy: dataset = np.array(dataset.cpu())
     return dataset
 
-def denormalize_dataset_coords(dataset_, features_to_consider_only=False):
-    return dataset_
-    is_numpy = isinstance(dataset_, np.ndarray)
-    if is_numpy: dataset_ = torch.tensor(dataset_)
-    dataset = dataset_.clone()
-    if not features_to_consider_only:
-        dataset = dataset * dataset_std + dataset_mean
-    else:
-        dataset = dataset * dataset_std[FEATURES_TO_CONSIDER] + dataset_mean[FEATURES_TO_CONSIDER]
-    if is_numpy: dataset = np.array(dataset.cpu())
-    return dataset
 
-dataset_trajectories = normalize_dataset_coords(dataset_trajectories)
 dataset_trajectories_cuda = dataset_trajectories.to(device)
 
 
@@ -141,276 +130,6 @@ class PositionalEncoding(nn.Module):
         # x: (batch_size, seq_len, d_model)
         x = x + self.pe[:, :x.size(1), :]  # match seq_len
         return self.dropout(x)
-
-
-# [8]:
-
-
-class FRENetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, num_heads=2, num_layers=2, d_model=128):
-        super().__init__()
-        
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.d_model = d_model
-        self.num_discrete_embeddings = 32
-        
-        self.encoder_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                self.d_model, 
-                num_heads, 
-                dim_feedforward=4*self.d_model, 
-                batch_first=True
-            ),
-            num_layers=num_layers
-        )
-        self.encoder_mean = nn.Linear(self.d_model, self.d_model)
-        self.encoder_log_std = nn.Linear(self.d_model, self.d_model)
-
-        self.state_embed = nn.Linear(self.state_dim, self.d_model // 2)
-        self.action_embed = nn.Linear(self.action_dim, self.d_model // 2)
-
-        self.action_predict = nn.Sequential(
-            nn.Linear(self.state_dim + self.d_model, 512),
-            nn.LayerNorm(512),
-            nn.Mish(),
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.Mish(),
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.Mish(),
-            nn.Linear(512, action_dim),
-            nn.Tanh()
-        )
-        
-        self.positional_encoding = PositionalEncoding(d_model=d_model, dropout=0.1, max_len=200)
-
-
-
-    def get_transformer_encoding(self, states, actions, pad_mask):  
-        
-        batch_size, num_anchors = states.shape[0], states.shape[1]
-        
-        if pad_mask is None:
-            pad_mask = torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=states.device)
-        # pad_mask.shape = [batch, anchors]
-                
-        state_emb = self.state_embed(states)
-        action_emb = self.action_embed(actions)
-        
-        state_action_emb = torch.concat([state_emb, action_emb], dim=-1)
-        
-        x = self.positional_encoding(state_action_emb)
-        w_pre = self.encoder_transformer(x, src_key_padding_mask=pad_mask) # [batch, anchors, emb_dim]
-        
-        
-        valid_tokens = (~pad_mask).float()  # (B, T), converts True -> 0, False -> 1
-        valid_tokens = valid_tokens.unsqueeze(-1)  # (B, T, 1)
-        sum_embeddings = (w_pre * valid_tokens).sum(dim=1)  # Sum over sequence dimension
-        w_pair_mean = sum_embeddings / valid_tokens.sum(dim=1)
-        
-        # w_pair_mean = w_pre.mean(axis=1)
-        # print(w_pair_mean.shape)
-        w_mean = self.encoder_mean(w_pair_mean)
-        w_log_std = self.encoder_log_std(w_pair_mean)
-
-        return w_mean, w_log_std # (batch_size, emb_dim)
-    
-    
-    def get_action_pred(self, w, states): # Reward Pairs: [batch, seq, obs_dim]
-        z_expand = w.unsqueeze(1) # [batch, 1, emb_dim]
-        z_expand = z_expand.repeat(1, states.shape[1], 1)        
-        
-        w_and_obs = torch.concatenate([z_expand, states], axis=-1)
-        
-        reward_pred = self.action_predict(w_and_obs)
-        
-        return reward_pred # [batch, reward_pairs]
-        
-
-
-# # FRE:
-
-# [9]:
-
-class MLPRewards:
-    def __init__(self, N, obs_len):
-
-        self.N = N
-        
-        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32), device=device) * np.sqrt(1/32)
-        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32), device=device) * np.sqrt(16)
-        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1), device=device) * np.sqrt(1/16)
-    
-    def sample(self, N):
-        return torch.randint(0, self.N, (N,))
-
-    def __call__(self, obs, param_id=None):
-        """
-        obs.shape = (batch_size, num_samples, obs_dim)
-        param_id.shape = (batch_size, 1)
-        """
-        
-        batch_size, num_samples, obs_dim = obs.shape
-        batch_size_, _ = param_id.shape
-        assert (batch_size == batch_size_)
-        
-        # device = obs.device
-        
-        if param_id is None:
-            param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
-        
-        param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded]
-        param1_b = self.param_b1[param_id_expanded]
-        param2_w = self.param_w2[param_id_expanded]
-
-        # obs[..., 2:] = 0.0
-        
-        x = torch.unsqueeze(obs, -2) # [batch, (pairs), 1, features_in]
-        x = torch.matmul(x, param1_w) # [batch, (pairs), 1, features_out]
-        x = x + param1_b
-        x = torch.tanh(x)
-        r = torch.matmul(x, param2_w) # [batch, (pairs), 1, 1]
-        r = r.squeeze(-1).squeeze(-1) # [batch, (pairs)]
-        r = torch.clip(r, -1, 1)
-
-        return r, param_id
-    
-# mlp_rewards = MLPRewards(N=10000, obs_len=29)
-
-# [10]:
-class LinearRewards:
-    def __init__(self, N, obs_len):
-
-        self.N = N
-        
-        self.param_w1 = torch.rand(size=(self.N, obs_len, 1)) * 2 - 1
-        self.random_mask = torch.rand(size=(self.N, obs_len)) < 0.9
-        self.random_mask[..., :2] = True
-        
-        random_mask_positive = np.random.randint(2, obs_len, size=(N,))
-        self.random_mask[np.arange(N), random_mask_positive] = False # Force at least one positive weight.
-        
-        self.param_w1 = self.param_w1.to(device)
-        self.random_mask = self.random_mask.to(device)
-        
-
-    def sample(self, N):
-        return torch.randint(0, self.N, (N,))
-
-    def __call__(self, obs, param_id=None):
-        """
-        obs.shape = (batch_size, num_samples, obs_dim)
-        param_id.shape = (batch_size, 1)
-        """
-        
-        batch_size, num_samples, obs_dim = obs.shape
-        batch_size_, _ = param_id.shape
-        assert (batch_size == batch_size_)
-        
-        # device = obs.device
-        
-        if param_id is None:
-            param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
-        
-        param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded]
-        mask = self.random_mask[param_id_expanded]
-        obs = (~mask) * obs
-        
-        x = torch.unsqueeze(obs, -2) # [batch, (pairs), 1, features_in]
-        r = torch.matmul(x, param1_w) # [batch, (pairs), 1, features_out]
-        r = r.squeeze(-1).squeeze(-1) # [batch, (pairs)]
-        r = torch.clip(r, -1, 1)
-
-        return r, param_id
-# [11]:
-
-
-class GoalRewards:
-    def __init__(self):
-        pass
-    
-    def sample_goals(self, N):
-        goals = dataset_trajectories[
-            torch.randint(0, num_trajectories, (N,)),
-            torch.randint(0, len_trajectory, (N,)),
-        ]
-        return goals
-    
-    # def get_states(self, num_states, goals):
-    #     cond = (dataset_trajectories[..., :2] - goal[..., :2]).norm(dim=-1) < 0.5
-    #     dataset_trajectories_cuda[cond][torch.randint(0, cond.sum(), (1,))]
-    
-    def __call__(self, obs, goals=None):
-        """
-        obs.shape = (batch_size, num_samples, obs_dim)
-        param.shape = (batch_size, obs_dim)
-        """
-        batch_size, num_samples, obs_dim = obs.shape
-        batch_size_, obs_dim_ = goals.shape
-        assert (batch_size == batch_size_) and (obs_dim == obs_dim_)
-        
-        device = obs.device
-        
-        goals = goals.to(device)
-
-        # r = torch.norm(obs - goals.unsqueeze(-2), dim=-1) < 2
-        r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 2
-        r = r.float() * 2 - 1
-        r = torch.clip(r, -1, 1)
-
-        return r, goals
-
-
-# [12]:
-
-
-linear_rewards = LinearRewards(N=10000, obs_len=29)
-mlp_rewards = MLPRewards(N=10000, obs_len=29)
-goal_rewards = GoalRewards()
-
-
-# [13]:
-
-
-def sample_reward_function_fre(batch_size, num_random_samples):
-
-    trajectories_idx = torch.randint(0, num_trajectories, (batch_size*num_random_samples,))
-    states_idx = torch.randint(0, len_trajectory, (batch_size*num_random_samples,))
-    random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
-    random_states = random_states.reshape(batch_size, num_random_samples, len(FEATURES_TO_CONSIDER)).to(device)
-
-    reward_params = torch.zeros((batch_size, 128))
-    random_states_rewards = torch.zeros((batch_size, num_random_samples))
-
-    for b in range(batch_size):
-        reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
-        
-        reward_params[b, 0] = reward_type
-        if reward_type == 0:
-            goal = goal_rewards.sample_goals(1)
-            goal = goal.repeat(1, 1)
-            r, param_id = goal_rewards(random_states[[b]], goals=goal)    
-            reward_params[b, 1:1+obs_dim] = param_id
-            random_states[b, 0] = goal
-            r[0, 0] = 1.
-            
-        elif reward_type == 1:
-            param_id = linear_rewards.sample(1).unsqueeze(0)
-            r, param_id = linear_rewards(random_states[[b]], param_id)
-            reward_params[b, 1] = param_id
-            
-        elif reward_type == 2:
-            param_id = mlp_rewards.sample(1).unsqueeze(0)
-            r, param_id = mlp_rewards(random_states[[b]], param_id) 
-            reward_params[b, 1] = param_id
-            
-        random_states_rewards[b] = r
-        
-    return reward_params, random_states, random_states_rewards
 
 
 
@@ -483,6 +202,425 @@ class FRENetwork(nn.Module):
         
         return reward_pred # [batch, reward_pairs]
         
+
+
+# Reward generator:
+
+EPISODE_LENGTH = TRAJECTORY_LEN
+Z_DIM = 128
+MIN_NUM_ANCHORS = 8
+MAX_NUM_ANCHORS = 16
+
+
+
+class RewardGeneratorTransformer(nn.Module):
+    def __init__(self, obs_len, num_heads=2, num_layers=2, reward_pairs_emb_dim=Z_DIM):
+        super().__init__()
+        
+        self.obs_len = obs_len
+        self.reward_pairs_emb_dim = reward_pairs_emb_dim
+        self.num_discrete_embeddings = 32
+        
+        self.encoder_transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                self.reward_pairs_emb_dim, 
+                num_heads, 
+                dim_feedforward=4*self.reward_pairs_emb_dim, 
+                batch_first=True
+            ),
+            num_layers=num_layers
+        )
+        self.encoder_mean = nn.Linear(self.reward_pairs_emb_dim, self.reward_pairs_emb_dim)
+        self.encoder_log_std = nn.Linear(self.reward_pairs_emb_dim, self.reward_pairs_emb_dim)
+
+        self.state_embed = nn.Linear(self.obs_len, self.reward_pairs_emb_dim // 2)
+        self.reward_embed = nn.Embedding(self.num_discrete_embeddings, self.reward_pairs_emb_dim // 2)
+
+        self.reward_predict = nn.Sequential(
+            nn.Linear(self.obs_len + self.reward_pairs_emb_dim, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, 1),
+            nn.Tanh()
+        )
+
+
+
+    def get_transformer_encoding(self, states, rewards, pad_mask):  
+        
+        mask = (states != 0).float()
+        states = normalize_dataset_coords(states)
+        states = states * mask
+        
+        batch_size, num_anchors = states.shape[0], states.shape[1]
+        
+        if pad_mask is None:
+            pad_mask = torch.zeros((batch_size, num_anchors), dtype=torch.bool, device=device)
+        # pad_mask.shape = [batch, anchors]
+        
+        # reward_values_idx = torch.floor(rewards * self.num_discrete_embeddings).int()
+        reward_values_idx = torch.floor((rewards*0.5+0.5) * self.num_discrete_embeddings).int() # dont forget that rewards are in [-1, 1]
+        reward_values_idx = torch.clip(reward_values_idx, 0, self.num_discrete_embeddings - 1)
+
+        
+        state_emb = self.state_embed(states)
+        reward_emb = self.reward_embed(reward_values_idx.squeeze(-1))
+        state_reward_emd = torch.concat((state_emb, reward_emb), dim=-1)
+        
+        w_pre = self.encoder_transformer(state_reward_emd, src_key_padding_mask=pad_mask) # [batch, anchors, emb_dim]
+        
+        
+        valid_tokens = (~pad_mask).float()  # (B, T), converts True -> 0, False -> 1
+        valid_tokens = valid_tokens.unsqueeze(-1)  # (B, T, 1)
+        sum_embeddings = (w_pre * valid_tokens).sum(dim=1)  # Sum over sequence dimension
+        w_pair_mean = sum_embeddings / valid_tokens.sum(dim=1)
+        
+        # w_pair_mean = w_pre.mean(axis=1)
+        # print(w_pair_mean.shape)
+        w_mean = self.encoder_mean(w_pair_mean)
+        w_log_std = self.encoder_log_std(w_pair_mean)
+
+        return w_mean, w_log_std # (batch_size, emb_dim)
+    
+    
+    def get_reward_pred(self, w, reward_states): # Reward Pairs: [batch, reward_pairs, obs_dim + 1]
+                        
+        mask = (reward_states != 0).float()
+        reward_states = normalize_dataset_coords(reward_states)
+        reward_states = reward_states * mask
+        
+        z_expand = w.unsqueeze(1) # [batch, 1, emb_dim]
+        z_expand = z_expand.repeat(1, reward_states.shape[1], 1)        
+        
+        w_and_obs = torch.concatenate([z_expand, reward_states], axis=-1)
+        
+        reward_pred = self.reward_predict(w_and_obs)
+        
+        return reward_pred # [batch, reward_pairs]
+    
+    
+    
+
+
+
+
+
+class RewardGenerator:
+    def __init__(self, fre_network: RewardGeneratorTransformer):
+        
+        self.fre_network = fre_network.to(device)
+        self.optimimizer = torch.optim.Adam(self.fre_network.parameters(), lr=0.001)
+        
+        self.len_params = Z_DIM
+        self.resampling_weights = None
+        
+    
+    def get_reward(self, obs, w):
+        self.fre_network.eval()
+        
+        # obs.shape == (batch_size, obs_len)
+        # w.shape == (batch_size, w_dim)
+        assert obs.shape[0] == w.shape[0]
+        assert len(obs.shape) == 2
+        
+        obs = obs.unsqueeze(1)
+        with torch.no_grad():
+            rewards_pred = self.fre_network.get_reward_pred(w, obs)
+        
+        return rewards_pred.reshape(-1, 1)
+    
+    
+    def get_training_data(self, batch_size, min_num_anchors, max_num_anchors):
+        assert min_num_anchors <= max_num_anchors
+
+        obs_dim = dataset_trajectories.shape[-1]
+        
+
+        # buffer = dataset_trajectories[..., :2].reshape(-1, 2)
+        buffer = dataset_trajectories[..., :].reshape(-1, obs_dim)
+        
+        anchors = torch.zeros((batch_size, max_num_anchors, obs_dim), dtype=torch.float32)
+
+        idx = self.get_importance_sampling_indices(batch_size*max_num_anchors,)
+        # anchors = buffer[idx, :2]
+        anchors = buffer[idx, :]
+        anchors = anchors.reshape(batch_size, max_num_anchors, obs_dim)
+
+            
+        anchors_rewards = torch.zeros((batch_size, max_num_anchors), dtype=torch.float32)
+        pad_mask = torch.ones((batch_size, max_num_anchors), dtype=torch.bool)
+
+        # Generate random number of anchors for each batch element
+        num_anchors = torch.randint(min_num_anchors, max_num_anchors + 1, (batch_size,))
+
+        reward_indices = torch.arange(max_num_anchors).unsqueeze(0)
+        reward_mask = reward_indices < num_anchors.unsqueeze(1)
+
+        
+        # candidates = torch.tensor([-1, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.])
+        
+        reward_types = torch.ones((batch_size,), dtype=torch.long) # 0: goal reaching | 1: MLP
+        
+        candidates = [
+            torch.tensor([-1, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.]),
+            torch.tensor([-1, -0.75, -0.5, -0.25, 0.0]),
+            torch.tensor([0.0, 0.25, 0.5, 0.75, 1.]),
+        ]
+        res = []
+        for b in range(batch_size):
+            x = torch.randint(0, len(candidates), (1,))
+            res.append(candidates[x][torch.randint(0, candidates[x].shape[0], (max_num_anchors,))])
+        anchors_rewards = torch.stack(res)
+        
+        # anchors_rewards[reward_mask] = candidates[torch.randint(0, candidates.shape[0], (reward_mask.sum(),))]
+        
+        # Goal reaching reward functions:
+        random_rows = torch.tensor([n for n in range(batch_size) if random.random() < 0.3], dtype=torch.long)
+        anchors_rewards[random_rows] = -1.
+        anchors_rewards[random_rows, 0] = 1.
+        reward_types[random_rows] = 0
+
+            
+        # rewards[reward_mask] = torch.exp(2*(rewards[reward_mask] - 1))
+        anchors_rewards = anchors_rewards.unsqueeze(-1)
+
+        pad_mask_indices = torch.arange(max_num_anchors).unsqueeze(0)
+        pad_mask = pad_mask_indices < num_anchors.unsqueeze(1)
+        pad_mask = ~pad_mask
+                
+        
+        anchors = anchors[..., FEATURES_TO_CONSIDER].float()
+        anchors_rewards = anchors_rewards.float()
+        pad_mask = pad_mask
+        
+        return (anchors, anchors_rewards, pad_mask), {'reward_types':reward_types}
+    
+
+    def generate_boolean_mask(self, batch_size, length, p=0.9):
+        vecs = (torch.rand(batch_size, length) > p).bool()
+        mask = ~vecs.any(dim=1)
+        if mask.any():
+            rows = mask.nonzero(as_tuple=False).squeeze(1)
+            cols = torch.randint(0, length, (rows.size(0),))
+            vecs[rows, cols] = True
+        
+        
+        if KEEP_ONLY_COORDS:
+            vecs = torch.zeros_like(vecs)
+            vecs[:, :2] = True
+            
+        return vecs * 1.
+    
+        
+    def train_step_VAE(self, batch_size, min_num_anchors, max_num_anchors):
+        self.fre_network.train()
+        
+        (anchors, anchors_rewards, pad_mask), info = self.get_training_data(
+            batch_size=batch_size, 
+            min_num_anchors=min_num_anchors, 
+            max_num_anchors=max_num_anchors,
+        )
+        anchors = anchors.to(device)
+        anchors_rewards = anchors_rewards.to(device)
+        pad_mask = pad_mask.to(device)
+        
+        mask = self.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.0)
+        # mask[..., :2] = 1
+        # mask[..., 2:] = 0
+
+        # Only keep coords for goal reaching rewards (reward_types == 0):
+        mask[info['reward_types'] == 0, :2] = 1
+        mask[info['reward_types'] == 0, 2:] = 0
+
+
+        mask = mask.unsqueeze(1).repeat(1, max_num_anchors, 1)
+        mask = mask.to(device)
+        anchors = anchors * mask
+                
+
+        w_mean, w_log_std = self.fre_network.get_transformer_encoding(anchors, anchors_rewards, pad_mask=pad_mask)
+        
+        
+        
+        w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
+        # w = w_mean
+        rewards_pred = self.fre_network.get_reward_pred(w, anchors)
+        
+        
+        reward_pred_loss = ((rewards_pred[~pad_mask] - anchors_rewards[~pad_mask])**2).mean()
+                        
+        
+        kl_loss = -0.5 * (1 + 2*w_log_std - w_mean**2 - torch.exp(w_log_std)**2).mean()
+        loss = reward_pred_loss + kl_loss * 0.01
+        
+        
+        self.optimimizer.zero_grad()
+        loss.backward()
+        self.optimimizer.step()
+        
+        return {
+            'loss': loss.item(),
+            'reward_pred_loss': reward_pred_loss.item(),
+            'kl_loss': kl_loss.item(),
+            'get_training_data:info': info,
+            'anchors': anchors.cpu(),
+            'anchors_rewards': anchors_rewards.cpu(),
+            'pad_mask': pad_mask.cpu(),
+        }
+        
+    
+    def get_z_from_random_anchors(self, batch_size: int, min_num_anchors:int, max_num_anchors:int, mask=None):
+        self.fre_network.eval()
+        
+        (anchors, anchors_rewards, pad_mask), info = self.get_training_data(
+            batch_size=batch_size, 
+            min_num_anchors=min_num_anchors, 
+            max_num_anchors=max_num_anchors,
+        )
+        anchors = anchors.to(device)
+        anchors_rewards = anchors_rewards.to(device)
+        pad_mask = pad_mask.to(device)
+        
+        if mask is None:
+            mask = self.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.0)
+        
+        assert mask.shape == (batch_size, len(FEATURES_TO_CONSIDER))
+        
+        mask = mask.unsqueeze(1).repeat(1, max_num_anchors, 1)
+        mask = mask.to(device)
+        anchors = anchors * mask
+        
+        eval_z, _ = self.get_z_from_anchors(anchors, anchors_rewards, pad_mask)
+        
+        return eval_z, {
+            'anchors': anchors.cpu(), 
+            'anchors_rewards': anchors_rewards.cpu(), 
+            'pad_mask': pad_mask.cpu(), 
+            'get_training_data:info': info
+        }
+    
+
+    def get_z_from_anchors(self, anchors: torch.Tensor, anchors_rewards: torch.Tensor, pad_mask: torch.Tensor):    
+        assert anchors.shape[:-1] == pad_mask.shape
+        self.fre_network.eval()
+        
+        batch_size = anchors.shape[0]
+        
+        with torch.no_grad():
+            w_mean, w_log_std = self.fre_network.get_transformer_encoding(anchors, anchors_rewards, pad_mask) 
+        
+        # eps = torch.normal(0, 1, (batch_size, self.emperical_mean.shape[0]), device=device)
+        # z = w_mean + eps * torch.exp(w_log_std)
+        z = w_mean
+        
+        return z, {'anchors': anchors.cpu()}
+            
+    
+    def get_importance_sampling_indices(self, N):
+        indices = torch.multinomial(self.resampling_weights, N, replacement=True)
+        return indices
+
+
+
+
+# info['anchors_rewards'].flatten()
+
+
+
+
+
+
+def sample_reward_function_fre(batch_size, num_random_samples):
+
+    trajectories_idx = torch.randint(0, num_trajectories, (batch_size*num_random_samples,))
+    states_idx = torch.randint(0, len_trajectory, (batch_size*num_random_samples,))
+    random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
+    random_states = random_states.reshape(batch_size, num_random_samples, len(FEATURES_TO_CONSIDER)).to(device)
+
+    reward_params = torch.zeros((batch_size, 128))
+    random_states_rewards = torch.zeros((batch_size, num_random_samples))
+
+
+    # num_anchors = 16
+    mask = reward_generator.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.3)
+    mask = torch.zeros_like(mask)
+    mask[..., [0, 1]] = 1
+    
+
+    with torch.no_grad():
+        reward_params, _ = reward_generator.get_z_from_random_anchors(batch_size, min_num_anchors=MIN_NUM_ANCHORS, max_num_anchors=MAX_NUM_ANCHORS, mask=mask)
+        
+        x = random_states * mask.unsqueeze(1).repeat(1, num_random_samples, 1).to(device)
+        
+        random_states_rewards = reward_generator.get_reward(
+            x.reshape(-1, obs_dim), 
+            reward_params.unsqueeze(1).repeat(1, num_random_samples, 1).reshape(-1, 128)
+        ).reshape(batch_size, num_random_samples)
+    
+    return reward_params, random_states, random_states_rewards
+
+
+
+
+
+def visualize_rewards_and_trajectories(eval_z, reward_generator, anchors=None, anchors_rewards=None, pad_mask=None, mask=None):
+
+    state = dataset_trajectories[0:300, :1000:10].reshape(-1, obs_dim)
+    state = state.to(device)
+
+
+    num_evals = eval_z.shape[0]
+    num_rows = int(np.floor(num_evals/4))
+    num_rows += 1 if (num_rows == 0) or num_evals % (num_rows*4) != 0 else 0
+    fig, axs = plt.subplots(num_rows, 4, figsize=(20, num_rows*4))
+    axs = axs.flatten()
+    
+    
+    if (anchors is not None) and (anchors_rewards is not None) and (pad_mask is not None):
+        anchors_rewards = anchors_rewards * 0.5 + 0.5
+        anchors_rewards = anchors_rewards.clip(0, 1)
+        anchors_rewards = anchors_rewards * 20
+        anchors_rewards = anchors_rewards + 0.1
+                
+        anchors = np.where(~pad_mask[..., None], anchors, None)
+        anchors_rewards = np.where(~pad_mask[..., None], anchors_rewards, 0)
+        
+        
+
+    for i in range(len(eval_z)):
+        
+        
+        
+        zi = eval_z[i].unsqueeze(0).repeat(state.shape[0], 1)
+        with torch.no_grad():
+            x = state[..., FEATURES_TO_CONSIDER]
+            if mask is not None:
+                x = x * mask[i].unsqueeze(0).repeat(state.shape[0], 1).to(device)
+            # x = torch.zeros_like(x)
+            r = reward_generator.get_reward(x, zi).cpu()
+        
+        
+        axs[i].scatter(state[:, 0].cpu(), state[:, 1].cpu(), c=r, alpha=0.7, s=20, vmin=-1, vmax=1)
+        
+        if (anchors is not None) and (anchors_rewards is not None) and (pad_mask is not None):
+            axs[i].scatter(anchors[i, :, 0], anchors[i, :, 1], c='red', s=anchors_rewards[i, :, 0].reshape(-1))
+    
+
+    return fig, axs, {'state':state.cpu(), 'r':r.cpu()} 
+    # plt.show()
+
+
+
+
+
+
+
 
 
 
@@ -868,90 +1006,100 @@ def run_benchmark(fre_network, iql_agent, steps):
 
 
 
-def get_G_s(batch, reward_params):
-
-    gamma = 0.99
-
-    batch_size = reward_params.shape[0]
-
-    discounted_sum_per_step_list = []
-    G_s = torch.zeros(batch['states'].shape[:2], device=device)
-
-    for b in range(batch_size):
-
-        param = reward_params[b]
-
-        trajectory_idx = torch.unique(batch['trajectory_idx'][b]).unsqueeze(-1)
-        state_idx = torch.arange(len_trajectory)
-        x = dataset_trajectories_cuda[trajectory_idx, state_idx]
-
-        if (param[0] == 2):
-            rewards, _ = mlp_rewards(
-                obs=x, 
-                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
-            )
-        elif (param[0] == 1):
-            rewards, _ = linear_rewards(
-                obs=x, 
-                param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long()
-            )
-        elif (param[0] == 0):
-            # print('pipipopo')
-            rewards, _ = goal_rewards(
-                obs=x,
-                goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1)
-            )
-            
-
-        discounts = gamma ** torch.arange(len_trajectory, device=rewards.device).unsqueeze(0)
-        discounted_rewards = rewards * discounts
-        reversed_cumsum = torch.flip(torch.cumsum(torch.flip(discounted_rewards, dims=[1]), dim=1), dims=[1])
-        discounted_sum_per_step = reversed_cumsum / discounts
-        
-        
-        discounted_sum_per_step_list.append(discounted_sum_per_step)
-        
-        abs_trajectory_idx = batch['trajectory_idx'][b]
-        abs_state_idx = batch['state_idx'][b]
-        
-        abs_to_relative_idx_map = {n:i for i, n in enumerate(trajectory_idx.reshape(-1).tolist())}
-        relative_trajectory_idx = [abs_to_relative_idx_map[n] for n in abs_trajectory_idx.tolist()]
-        
-        G_s[b] = discounted_sum_per_step[relative_trajectory_idx, abs_state_idx]
-        
-    return G_s.unsqueeze(-1), {'discounted_sum_per_step':discounted_sum_per_step_list}
-
-
 
 def get_reward(reward_params, random_states):
+    """
+    reward_params: (batch_size, z_dim)
+    random_states: (batch_size, num_states, obs_dim)
+    """
 
     assert len(reward_params.shape) == 2
     assert len(random_states.shape) == 3
     assert reward_params.shape[0] == random_states.shape[0]
     
-    all_rewards = torch.zeros((random_states.shape[0], random_states.shape[1]), device=device)
+    batch_size, num_random_samples, _ = random_states.shape
+    
+    with torch.no_grad():
+        rewards = reward_generator.get_reward(
+            random_states.reshape(-1, obs_dim), 
+            reward_params.unsqueeze(1).repeat(1, num_random_samples, 1).reshape(-1, 128)
+        ).reshape(batch_size, num_random_samples)
+    
+    return rewards
 
-    for b in range(reward_params.shape[0]):
-        param = reward_params[b]
-        x = random_states[b].unsqueeze(0)
-        if (param[0] == 2):
-            rewards, _ = mlp_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 1):
-            rewards, _ = linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 0):
-            rewards, _ = goal_rewards(obs=x, goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1))
-        
-        all_rewards[b] = rewards.float()
 
-    return all_rewards
+
+rg_model = RewardGeneratorTransformer(obs_len=obs_dim)
+rg_model.load_state_dict(torch.load('shared_models/offline_fre+reward_generator-rg_model.pth'))
+reward_generator = RewardGenerator(fre_network=rg_model)
+
+reward_generator.resampling_weights = torch.full((dataset_trajectories.shape[0] * dataset_trajectories.shape[1],), 1/1e6)
 
 
 
 def main(args):
     
+    
+    
+    # Train reward generator #########################################################################################################
+        
+        
+    
+
+
+    vae_loss, vae_kl_loss = [], []
+
+
+    for step in tqdm(range(0), desc='Reward Generator training', leave=False):
+        
+        vae_loss_dict = reward_generator.train_step_VAE(
+            batch_size=256,
+            min_num_anchors=MIN_NUM_ANCHORS,
+            max_num_anchors=MAX_NUM_ANCHORS,
+        )
+        vae_loss.append(vae_loss_dict['loss'])
+        vae_kl_loss.append(vae_loss_dict['kl_loss'])   
+        
+        if step % 100 == 0:
+            # clear_output(True)
+            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+            axs[0].plot(vae_loss)
+            axs[0].set_ylim([0, 0.5])
+            # axs[0].set_xscale('log')
+            axs[1].plot(vae_kl_loss)
+            axs[1].set_ylim([0, 1])
+            plt.savefig(f"{args.LOGS_FOLDER}/Reward Generator loss.png")
+            plt.close()
+            
+        # break
+
+
+
+
+
+    eval_num_envs = 16
+    num_anchors = 16
+
+    mask = reward_generator.generate_boolean_mask(eval_num_envs, len(FEATURES_TO_CONSIDER), p=0.3)
+    mask = torch.zeros_like(mask)
+    mask[..., [0, 1,]] = 1.
+    # mask = None
+
+    with torch.no_grad():
+        w, info = reward_generator.get_z_from_random_anchors(eval_num_envs, min_num_anchors=num_anchors, max_num_anchors=num_anchors, mask=mask)
+        
+    fig, axs, info = visualize_rewards_and_trajectories(w, reward_generator, mask=mask)
+    
+    plt.savefig(f"{args.LOGS_FOLDER}/Reward Generator examples.png")
+    
+    
+    
+    
+    # Train FRE network ########################################################################################################################
+    
         
     fre_network = FRENetwork(obs_len=obs_dim).to(device)
-    fre_network.load_state_dict(torch.load('shared_models/offline_fre-fre_network.pth'))
+    # fre_network.load_state_dict(torch.load('shared_models/offline_fre-fre_network.pth'))
     optimimizer = torch.optim.Adam(fre_network.parameters(), lr=0.001)
 
     reward_losses = []
@@ -964,7 +1112,7 @@ def main(args):
     num_encode_states = 128
     num_decode_states = 128
 
-    for i in tqdm(range(0)):
+    for i in tqdm(range(10_000), desc='Fre network training'):
         
         reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
         
@@ -1007,7 +1155,8 @@ def main(args):
             # axs[0].set_xscale('log')
             axs[0].set_ylim(0, 0.5)
             axs[1].plot(kl_losses)
-            plt.show()
+            plt.savefig(f"{args.LOGS_FOLDER}/Fre network losses.png")
+            plt.close()
     
     ################################################################################################################ 
     
@@ -1077,7 +1226,7 @@ def main(args):
     iql_num_states = 512
 
 
-    for timestep in tqdm(range(1, args.iql_training_steps+1)):
+    for timestep in tqdm(range(1, args.iql_training_steps+1), 'IQL training'):
 
         
         reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=iql_batch_size, num_random_samples=128)
@@ -1091,9 +1240,6 @@ def main(args):
             num_states=iql_num_states
         )
         
-        if args.use_value_ground_truth:
-            G_s, get_G_s_info = get_G_s(batch, reward_params)
-            batch['G_s'] = G_s.to(device)
         
         with torch.no_grad():
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)   
@@ -1116,10 +1262,7 @@ def main(args):
         
         v = iql_agent.get_value(w_target, batch['states'])
         
-        if args.use_value_ground_truth:
-            adv = batch['G_s'] - v
-        else:
-            adv = target_q - v
+        adv = target_q - v
             
         v_loss = expectile_loss(adv, config['expectile'])
         v_loss = v_loss.mean()
@@ -1247,7 +1390,6 @@ from datetime import datetime
 def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')
-    parser.add_argument('--use_value_ground_truth', action='store_true', default=False)      
     return parser.parse_args()
 
 
@@ -1262,9 +1404,8 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'fre_iql'
-    if args.use_value_ground_truth:
-        exp_name = f'fre_iql:use_value_ground_truth'
+    exp_name = f'fre_iql+rg'
+
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'

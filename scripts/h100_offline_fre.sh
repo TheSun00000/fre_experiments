@@ -28,3 +28,4 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 # python offline_fre.py --iql_training_steps 1000000
 # python offline_fre+traj_score.py --iql_training_steps 300000
 python offline_fre+expectile_G.py --iql_training_steps 500000 --folder_name "r=0.5 500000" --optimal_states_ratio 0.5
+# python offline_fre+expectile_G.py --iql_training_steps 10 --folder_name "tmp" --optimal_states_ratio 0.5
