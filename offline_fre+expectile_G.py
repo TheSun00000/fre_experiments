@@ -1261,10 +1261,10 @@ def main(args):
             plt.savefig(f"{args.LOGS_FOLDER}/iql_training_losses.png")
             plt.close()
             
-        if timestep % (args.iql_training_steps // 5) == 0:
+        if timestep % (args.iql_training_steps // 10) == 0:
             run_benchmark(fre_network, iql_agent, steps=timestep)
             
-        if timestep % (args.iql_training_steps // 5) == 0:
+        if timestep % (args.iql_training_steps // 10) == 0:
             torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
     
     
