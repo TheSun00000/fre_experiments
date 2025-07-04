@@ -907,7 +907,6 @@ def run_test(fre_network, iql_agent, benchmark_id, num_evals, num_eval_anchors):
         env.reset()
         location = (20, 15)
         start_state = reset_to_location(env, location)
-        start_state = normalize_dataset_coords(start_state)[..., :]
         state = start_state
 
         tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
@@ -928,7 +927,7 @@ def run_test(fre_network, iql_agent, benchmark_id, num_evals, num_eval_anchors):
                 
             new_state, _, _, _ = env.step(action)
             
-            state = normalize_dataset_coords(new_state)[..., :]
+            state = new_state
             
         produced_trajectory = np.stack(produced_trajectory)
         produced_trajectories.append(produced_trajectory)
