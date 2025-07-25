@@ -1157,6 +1157,8 @@ def main(args):
             plt.savefig(f"{args.LOGS_FOLDER}/Fre network losses.png")
             plt.close()
     
+    torch.save(fre_network.state_dict(), f"{args.MODEL_SAVE_FOLDER}/fre_network.pth")
+
     ################################################################################################################ 
     
     num_eval_states = 10_000

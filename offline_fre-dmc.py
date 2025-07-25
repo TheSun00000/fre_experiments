@@ -22,59 +22,64 @@ device
 
 # [2]:
 
+ENV_NAME = 'cheetah' # cheetah | walker
 
-TRAJECTORY_LEN = 1001
-STATE_DIM = 29
-# FEATURES_TO_CONSIDER = [0, 1, 15, 16]
-FEATURES_TO_CONSIDER = torch.arange(29)
+NUM_TRAJECTORIES = 10000
+TRAJECTORY_LEN = 1000
 
-KEEP_ONLY_COORDS = True
+KEEP_ONLY_COORDS = False
 
-
-# [3]:
-
-
-def reset_to_location(env, location):
-    env.sim.reset()
-    qpos = env.init_qpos + env.np_random.uniform(low=-.1, high=.1, size=env.model.nq)
-    qpos[:2] = np.array(location).astype(env.observation_space.dtype)
-    qvel = env.init_qvel + env.np_random.randn(env.model.nv) * .1
-    env.set_state(qpos, qvel)
-    return env.unwrapped._get_obs()
-
-
-# [4]:
-
-
-import gym
-import d4rl # Import required to register environments, you may need to also import the submodule
 
 # Create the environment
-env = gym.make('antmaze-large-diverse-v2')
-dataset = env.get_dataset()
+from dm_control import suite
+
+if ENV_NAME == 'cheetah':
+    STATE_DIM = 18
+    ACTION_DIM = 6
+    AUX_DIM = 1
+    env = suite.load(
+        domain_name='cheetah',
+        task_name='run',
+        environment_kwargs=dict(flat_observation=True)
+    )
+    dataset = np.load('datasets/cheetah_rnd.npy', allow_pickle=True).item()
+    aux = np.load('datasets/aux_cheetah.npy')
+    dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 1)), axis=-1)
+    
+else:
+    STATE_DIM = 27
+    ACTION_DIM = 6
+    AUX_DIM = 3
+    env = suite.load(
+        domain_name='walker',
+        task_name='walk',
+        environment_kwargs=dict(flat_observation=True)
+    )
+    dataset = np.load('datasets/walker_rnd.npy', allow_pickle=True).item()
+    aux = np.load('datasets/aux_walker.npy')
+    dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
 
 
 # [189]:
 
 
-dataset_trajectories = torch.tensor(dataset['observations'])
-dataset_trajectories = dataset_trajectories[..., :STATE_DIM]
+dataset_trajectories = torch.tensor(dataset['observations']).float()
+dataset_trajectories = dataset_trajectories
 # dataset_trajectories = torch.concatenate((dataset_trajectories[..., [0, 1]], dataset_trajectories[..., [15, 16]]), dim=-1)
 
-dataset_actions = torch.tensor(dataset['actions'])
-dataset_terminals = torch.tensor(dataset['terminals'])
-dataset_timeouts = torch.tensor(dataset['timeouts'])
+dataset_actions = torch.tensor(dataset['actions']).float()
+dataset_terminals = torch.tensor(dataset['terminals']).float()
+dataset_timeouts = torch.zeros(NUM_TRAJECTORIES, TRAJECTORY_LEN).bool()
+dataset_timeouts[:, -1] = True
 
-dataset_goals = torch.tensor(dataset['infos/goal'])
+dataset_goals = torch.tensor(dataset['infos/goal']).float()
 
 
 
-# [:999*1001]
-
-dataset_trajectories = dataset_trajectories[:999*1001].reshape(-1, 1001, STATE_DIM)
-dataset_actions = dataset_actions[:999*1001].reshape(-1, 1001, 8)
-dataset_terminals = dataset_terminals[:999*1001]
-dataset_timeouts = dataset_timeouts[:999*1001].reshape(-1, 1001)
+dataset_trajectories = dataset_trajectories.reshape(-1, TRAJECTORY_LEN, STATE_DIM)
+dataset_actions = dataset_actions.reshape(-1, TRAJECTORY_LEN, ACTION_DIM)
+dataset_terminals = dataset_terminals
+dataset_timeouts = dataset_timeouts.reshape(-1, TRAJECTORY_LEN)
 
 
 num_trajectories, len_trajectory, obs_dim = dataset_trajectories.shape
@@ -233,15 +238,20 @@ class FRENetwork(nn.Module):
 # # FRE:
 
 # [9]:
-
 class MLPRewards:
     def __init__(self, N, obs_len):
 
         self.N = N
         
-        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32), device=device) * np.sqrt(1/32)
-        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32), device=device) * np.sqrt(16)
-        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1), device=device) * np.sqrt(1/16)
+        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32)) * np.sqrt(1/32)
+        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32)) * np.sqrt(16)
+        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1)) * np.sqrt(1/16)
+        
+        if obs_len == 18:
+            self.param_w1[:, -1:] = 0
+        elif obs_len == 27:
+            self.param_w1[:, -3:] = 0
+            
     
     def sample(self, N):
         return torch.randint(0, self.N, (N,))
@@ -256,18 +266,18 @@ class MLPRewards:
         batch_size_, _ = param_id.shape
         assert (batch_size == batch_size_)
         
-        # device = obs.device
+        device = obs.device
         
         if param_id is None:
             param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded]
-        param1_b = self.param_b1[param_id_expanded]
-        param2_w = self.param_w2[param_id_expanded]
+        param1_w = self.param_w1[param_id_expanded].to(device)
+        param1_b = self.param_b1[param_id_expanded].to(device)
+        param2_w = self.param_w2[param_id_expanded].to(device)
 
         # obs[..., 2:] = 0.0
-        
+
         x = torch.unsqueeze(obs, -2) # [batch, (pairs), 1, features_in]
         x = torch.matmul(x, param1_w) # [batch, (pairs), 1, features_out]
         x = x + param1_b
@@ -278,9 +288,9 @@ class MLPRewards:
 
         return r, param_id
     
-# mlp_rewards = MLPRewards(N=10000, obs_len=29)
 
-# [10]:
+
+
 class LinearRewards:
     def __init__(self, N, obs_len):
 
@@ -288,13 +298,18 @@ class LinearRewards:
         
         self.param_w1 = torch.rand(size=(self.N, obs_len, 1)) * 2 - 1
         self.random_mask = torch.rand(size=(self.N, obs_len)) < 0.9
-        self.random_mask[..., :2] = True
+        # self.random_mask[..., :2] = True
         
         random_mask_positive = np.random.randint(2, obs_len, size=(N,))
         self.random_mask[np.arange(N), random_mask_positive] = False # Force at least one positive weight.
         
-        self.param_w1 = self.param_w1.to(device)
-        self.random_mask = self.random_mask.to(device)
+        if obs_len == 18:
+            self.param_w1[:, -1:] = 0
+        elif obs_len == 27:
+            self.param_w1[:, -3:] = 0
+            
+            
+            
         
 
     def sample(self, N):
@@ -310,14 +325,14 @@ class LinearRewards:
         batch_size_, _ = param_id.shape
         assert (batch_size == batch_size_)
         
-        # device = obs.device
+        device = obs.device
         
         if param_id is None:
             param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded]
-        mask = self.random_mask[param_id_expanded]
+        param1_w = self.param_w1[param_id_expanded].to(device)
+        mask = self.random_mask[param_id_expanded].to(device)
         obs = (~mask) * obs
         
         x = torch.unsqueeze(obs, -2) # [batch, (pairs), 1, features_in]
@@ -326,7 +341,7 @@ class LinearRewards:
         r = torch.clip(r, -1, 1)
 
         return r, param_id
-# [11]:
+
 
 
 class GoalRewards:
@@ -349,6 +364,13 @@ class GoalRewards:
         obs.shape = (batch_size, num_samples, obs_dim)
         param.shape = (batch_size, obs_dim)
         """
+        
+        if obs.shape[-1] == 18:
+            std = torch.tensor([[0.4407440506721877, 10.070289916801876, 0.5172332956856273, 0.5601041145815341, 0.518947027289748, 0.3204431592542281, 0.5501848643154092, 0.3856393812067661, 1.9882502334402663, 1.6377168569884073, 4.308505013609855, 12.144181770553105, 13.537567521831702, 16.88983033626308, 7.715009572436841, 14.345667964212357, 10.6904255152284, 100]])
+        elif obs.shape[-1] == 27:
+            std = torch.tensor([[0.7212967364054736, 0.6775020895964047, 0.7638155887842976, 0.6395721376821286, 0.6849394775886244, 0.7078581708129903, 0.7113168519036742, 0.6753408522523937, 0.6818095329625652, 0.7133958718133511, 0.65227578338642, 0.757622576816855, 0.7311826446274479, 0.6745824928740024, 0.36822491550384456, 2.1134839667805805, 1.813353841099317, 10.594648894374815, 17.41041469033713, 17.836743227082106, 22.399097178637533, 16.1492222730888, 15.693574546557201, 18.539929326905067, 100, 100, 100]])
+
+        
         batch_size, num_samples, obs_dim = obs.shape
         batch_size_, obs_dim_ = goals.shape
         assert (batch_size == batch_size_) and (obs_dim == obs_dim_)
@@ -358,18 +380,19 @@ class GoalRewards:
         goals = goals.to(device)
 
         # r = torch.norm(obs - goals.unsqueeze(-2), dim=-1) < 2
-        r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 2
+        dists_per_dim = obs - goals.unsqueeze(-2)
+        dists_per_dim = dists_per_dim / std.to(device)
+        dists = torch.norm(dists_per_dim, dim=-1) / obs.shape[-1]
+        r = (dists < 0.2)
         r = r.float() * 2 - 1
         r = torch.clip(r, -1, 1)
 
         return r, goals
 
 
-# [12]:
 
-
-linear_rewards = LinearRewards(N=10000, obs_len=29)
-mlp_rewards = MLPRewards(N=10000, obs_len=29)
+linear_rewards = LinearRewards(N=10000, obs_len=STATE_DIM)
+mlp_rewards = MLPRewards(N=10000, obs_len=STATE_DIM)
 goal_rewards = GoalRewards()
 
 
@@ -381,13 +404,16 @@ def sample_reward_function_fre(batch_size, num_random_samples):
     trajectories_idx = torch.randint(0, num_trajectories, (batch_size*num_random_samples,))
     states_idx = torch.randint(0, len_trajectory, (batch_size*num_random_samples,))
     random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
-    random_states = random_states.reshape(batch_size, num_random_samples, len(FEATURES_TO_CONSIDER)).to(device)
+    random_states = random_states.reshape(batch_size, num_random_samples, STATE_DIM).to(device)
 
     reward_params = torch.zeros((batch_size, 128))
     random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
     for b in range(batch_size):
-        reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
+        # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
+        reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
+        
+        # reward_type = 0
         
         reward_params[b, 0] = reward_type
         if reward_type == 0:
@@ -487,30 +513,110 @@ class FRENetwork(nn.Module):
 
 
 
-from utils.antmaze_benchmark import VelocityRewardFunction, SimplexRewardFunction, TestRewPath, TestRewLoop, TestRewMatrixEdges, goal_reaching_reward
+class VelocityRewardFunctionCheetah:
+    def __init__(self):
+        pass    
+    
+    def _sigmoids(self, x, value_at_1, sigmoid):
+        if sigmoid == 'linear':
+            scale = 1-value_at_1
+            scaled_x = x*scale
+            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
+        else:
+            raise NotImplementedError
+    
+    def tolerance(self, x, lower, upper, margin=0.0, sigmoid='linear', value_at_margin=0):
+        in_bounds = np.logical_and(lower <= x, x <= upper)
+        d = np.where(x < lower, lower - x, x - upper) / margin
+        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
+        return value
+    
+    def compute_reward(self, states, params):
+        
+        if isinstance(params, int):
+            params = torch.full((*states.shape[:-1], 1), fill_value=params)
+        
+        assert len(states.shape) == len(params.shape), states.shape # (batch_size, obs_dim) OR (batch_size, num_pairs, obs_dim)
 
-velocity_reward_function = VelocityRewardFunction()
-simplex_reward_function = SimplexRewardFunction(num_simplex=10)
+        horizontal_velocity = states[..., 17:18]
+        sign_of_param = np.sign(params)
+        horizontal_velocity = horizontal_velocity * sign_of_param
+        rew = self.tolerance(horizontal_velocity,
+                             lower=np.abs(params),
+                             upper=float('inf'),
+                             margin=np.abs(params),
+                             value_at_margin=0,
+                             sigmoid='linear')
+        
+        return torch.tensor(rew[..., 0])
+    
+    
+    
+class VelocityRewardFunctionWalker:
+    def __init__(self):
+        pass    
 
-benchmarks = [
-    (goal_reaching_reward, 'goal_bottom', np.array([28, 0])),
-    (goal_reaching_reward, 'goal_left', np.array([0, 15])),
-    (goal_reaching_reward, 'goal_top', np.array([35, 24])),
-    (goal_reaching_reward, 'goal_center', np.array([12, 24])), 
-    (goal_reaching_reward, 'goal_right', np.array([33, 16])),
-    (velocity_reward_function.compute_reward, 'vel_left', [-1, 0]),
-    (velocity_reward_function.compute_reward, 'vel_up', [0, 1]),
-    (velocity_reward_function.compute_reward, 'vel_down', [0, -1]),
-    (velocity_reward_function.compute_reward, 'vel_right', [1, 0]),
-    (simplex_reward_function.compute_reward, 'simplex_1', 1),
-    (simplex_reward_function.compute_reward, 'simplex_2', 2),
-    (simplex_reward_function.compute_reward, 'simplex_3', 3),
-    (simplex_reward_function.compute_reward, 'simplex_4', 4),
-    (simplex_reward_function.compute_reward, 'simplex_5', 5),
-    (TestRewPath().compute_reward, 'path_center', None),
-    (TestRewLoop().compute_reward, 'path_loop', None),
-    (TestRewMatrixEdges().compute_reward, 'path_edges', None)
-]
+    def _sigmoids(self, x, value_at_1, sigmoid):
+        if sigmoid == 'gaussian':
+            scale = np.sqrt(-2 * np.log(value_at_1))
+            return np.exp(-0.5 * (x*scale)**2)
+
+        elif sigmoid == 'linear':
+            scale = 1-value_at_1
+            scaled_x = x*scale
+            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
+    
+    def tolerance(self, x, lower, upper, margin=0.0, sigmoid='gaussian', value_at_margin=0.1):
+        in_bounds = np.logical_and(lower <= x, x <= upper)
+        d = np.where(x < lower, lower - x, x - upper) / margin
+        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
+        return torch.tensor(value)
+    
+    def compute_reward(self, states, params):
+        
+        if isinstance(params, int) or isinstance(params, float):
+            params = torch.full((*states.shape[:-1], 1), fill_value=params)
+        
+        assert len(states.shape) == len(params.shape), states.shape # (batch_size, obs_dim) OR (batch_size, num_pairs, obs_dim)
+
+        _STAND_HEIGHT = 1.2
+        horizontal_velocity = states[..., 24:25]
+        torso_upright = states[..., 25:26]
+        torso_height = states[..., 26:27]
+        standing = self.tolerance(torso_height, lower=_STAND_HEIGHT, upper=float('inf'), margin=_STAND_HEIGHT/2)
+        upright = (1 + torso_upright) / 2
+        stand_reward = (3*standing + upright) / 4
+        move_reward = self.tolerance(horizontal_velocity,
+                                        lower=params,
+                                        upper=float('inf'),
+                                        margin=params/2,
+                                        value_at_margin=0.5,
+                                        sigmoid='linear')
+        # move_reward[params == 0] = stand_reward[params == 0]
+        # rew = stand_reward * (5*move_reward + 1) / 6
+        rew = (5*move_reward + 1) / 6
+        
+        return torch.tensor(rew[..., 0])
+
+
+
+if ENV_NAME == 'cheetah':
+    velocity_reward_function = VelocityRewardFunctionCheetah()
+    benchmarks = [
+        (velocity_reward_function.compute_reward, 'vel10Back', -10),
+        (velocity_reward_function.compute_reward, 'vel2Back', -2),
+        (velocity_reward_function.compute_reward, 'vel2', 2),
+        (velocity_reward_function.compute_reward, 'vel10', 10),
+    ]
+elif ENV_NAME == 'walker':
+    velocity_reward_function = VelocityRewardFunctionWalker()
+    benchmarks = [
+        (velocity_reward_function.compute_reward, 'vel0.1', 0.1),
+        (velocity_reward_function.compute_reward, 'vel1', 1),
+        (velocity_reward_function.compute_reward, 'vel4', 4),
+        (velocity_reward_function.compute_reward, 'vel8', 10),
+    ]
+    
 
 
 
@@ -659,188 +765,25 @@ def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
 # [211]:
 
 
+def get_iql_training_data(batch_size, num_states):
 
+    trajectory_idx = torch.randint(0, num_trajectories, (batch_size*num_states,))
+    state_idx = torch.randint(0, len_trajectory, (batch_size*num_states,)) % (len_trajectory - 1)
 
-
-
-
-def get_reward(reward_params, random_states):
-    """
-    reward_params.shape: (batch_size, param_dim)
-    len(random_states.shape): (batch_size, num_samples, param_dim)
-    """
-
-    assert len(reward_params.shape) == 2
-    assert len(random_states.shape) == 3
-    assert reward_params.shape[0] == random_states.shape[0]
+    states = dataset_trajectories[trajectory_idx, state_idx].reshape(batch_size, num_states, obs_dim)
+    next_states = dataset_trajectories[trajectory_idx, state_idx+1].reshape(batch_size, num_states, obs_dim)
+    actions = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, num_states, ACTION_DIM)
+    masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, num_states, 1)
     
-    all_rewards = torch.zeros((random_states.shape[0], random_states.shape[1]), device=device)
-
-    for b in range(reward_params.shape[0]):
-        param = reward_params[b]
-        x = random_states[b].unsqueeze(0)
-        if (param[0] == 2):
-            rewards, _ = mlp_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 1):
-            rewards, _ = linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 0):
-            rewards, _ = goal_rewards(obs=x, goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1))
-        
-        all_rewards[b] = rewards.float()
-
-    return all_rewards
-
-
-
-
-
-
-def get_trajectory_scores(reward_params, num_considered_states=100, gamma=0.99, topk=50):
-    
-    batch_size = reward_params.shape[0]
-
-    trajectories_scores = torch.zeros((batch_size, num_trajectories), device=device)
-
-    for b in range(batch_size):
-
-        param = reward_params[b]
-
-        state_idx = torch.linspace(0, len_trajectory-1, num_considered_states).long()
-        x = dataset_trajectories_cuda[:, state_idx]
-
-        if (param[0] == 2):
-            rewards, _ = mlp_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 1):
-            rewards, _ = linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
-        elif (param[0] == 0):
-            rewards, _ = goal_rewards(obs=x, goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1))
-
-        # print(rewards.mean())
-
-        discounts = torch.tensor([gamma ** (t*(len_trajectory//num_considered_states)) for t in range(num_considered_states, 0, -1)], device=device)
-        discounts = discounts.unsqueeze(0).repeat(num_trajectories, 1)
-        cum_rewards = (rewards * discounts).sum(dim=1)
-        
-        # scores = (cum_rewards >= torch.topk(cum_rewards, topk).values.min()).float()
-        
-        scores = torch.zeros_like(cum_rewards)
-        scores[cum_rewards.argsort(descending=True)[:topk]] = 1.
-                
-                        
-        trajectories_scores[b] = scores
-
-    return trajectories_scores
-
-
-
-
-def get_iql_training_data(batch_size, num_states, in_target_states_ratio, topk, num_random_samples=1):
-    # batch_size = 16
-    # num_states = 1024
-    # in_target_states_ratio = 0.8
-    # topk = 50
-    # num_random_samples = 1
-
-    reward_params, sampled_states, sampled_states_rewards = sample_reward_function_fre(batch_size=batch_size, num_random_samples=num_random_samples)
-
-    trajectories_scores = get_trajectory_scores(reward_params, gamma=0.99, topk=topk).cpu()
-
-    num_target_states = int(num_states * in_target_states_ratio)
-    num_random_states = num_states - num_target_states
-
-
-    # target_trajectory_idx = target_trajectory_idx_.unsqueeze(1).repeat(1, num_target_states).reshape(-1)
-    target_trajectory_idx_ = torch.nonzero(trajectories_scores)[:, 1].reshape(batch_size, topk)
-
-    target_trajectory_idx = target_trajectory_idx_[
-        torch.arange(0, batch_size).unsqueeze(1).repeat(1, num_target_states).flatten(),
-        torch.randint(0, topk, (batch_size*num_target_states,))
-    ]
-
-    target_states_idx = torch.randint(0, len_trajectory-1, (num_target_states*batch_size,))
-
-    target_states = dataset_trajectories[target_trajectory_idx, target_states_idx].reshape(batch_size, num_target_states, -1)
-    target_next_states = dataset_trajectories[target_trajectory_idx, target_states_idx + 1].reshape(batch_size, num_target_states, -1)
-    target_actions = dataset_actions[target_trajectory_idx, target_states_idx].reshape(batch_size, num_target_states, -1)
-    # target_rewards = torch.ones((batch_size, num_target_states), dtype=torch.float)
-    
-    target_rewards = get_reward(reward_params, target_states.to(device)).cpu()
-    target_rewards = (target_rewards - target_rewards.min()) / (target_rewards.max() - target_rewards.min() + 1e-5)
-    
-    
-    target_masks = ~dataset_timeouts[target_trajectory_idx, target_states_idx + 1].reshape(batch_size, num_target_states)
-
-
-    random_trajectory_idx = torch.randint(0, num_trajectories, (num_random_states*batch_size,))
-    random_states_idx = torch.randint(0, len_trajectory-1, (num_random_states*batch_size,))
-
-    random_states = dataset_trajectories[random_trajectory_idx, random_states_idx].reshape(batch_size, num_random_states, -1)
-    random_next_states = dataset_trajectories[random_trajectory_idx, random_states_idx + 1].reshape(batch_size, num_random_states, -1)
-    random_actions = dataset_actions[random_trajectory_idx, random_states_idx].reshape(batch_size, num_random_states, -1)
-    random_rewards = torch.zeros((batch_size, num_random_states), dtype=torch.float)
-    random_masks = ~dataset_timeouts[random_trajectory_idx, random_states_idx + 1].reshape(batch_size, num_random_states)
-
-
-    states = torch.concat((target_states, random_states), dim=1)
-    next_states = torch.concat((target_next_states, random_next_states), dim=1)
-    actions = torch.concat((target_actions, random_actions), dim=1)
-    rewards = torch.concat((target_rewards, random_rewards), dim=1).unsqueeze(-1)
-    masks = torch.concat((target_masks, random_masks), dim=1).unsqueeze(-1)
-
     return {
-        'reward_params': reward_params.to(device),
         'states': states.to(device),
-        'next_states': next_states.to(device), 
         'actions': actions.to(device),
-        'rewards': rewards.to(device),
+        'next_states': next_states.to(device),
         'masks': masks.to(device),
-        
-        'sampled_states': sampled_states.cpu(),
-        'sampled_states_rewards': sampled_states_rewards.cpu(),
-        'target_trajectory_idx_': target_trajectory_idx_.cpu()
     }
 
 
 
-
-import matplotlib.patches as patches
-
-
-def add_largest_maze_walls(ax):    
-
-    maze_optim = [
-        (1, 1, 1, 2),    
-        (0, 4, 2, 1),
-        (3, 1, 1, 4),
-        (5, 0, 1, 1),
-        (4, 2, 3, 1),
-        (1, 6, 3, 1),
-        (4, 4, 2, 1),
-        (5, 6, 2, 1),
-        (1, 8, 1, 1),
-        (3, 7, 1, 2),
-        (5, 8, 1, 2)
-    ]
-
-    block_size = 0.025 * 80
-
-    height, width = 7, 10
-    torso_x, torso_y = (width - 1)*block_size, (height - 1)*block_size
-
-    rects = []
-    for i in range(len(maze_optim)):
-        (y, x, w, h) = maze_optim[i]
-            
-        x = x * block_size * 2 - torso_x + (h - 1) * block_size - h * block_size + 18
-        y = y * block_size * 2 - torso_y + (w - 1) * block_size - w * block_size + 12
-        h, w = h * block_size * 2, w * block_size * 2
-        w = w * 1.
-        y = y * 1.
-        rect = patches.Rectangle((x, y), h, w, linewidth=2, edgecolor='gray', facecolor='gray')
-
-        ax.add_patch(rect)
-        
-        
         
 def get_eval_rewards(fre_network, eval_z, to_keep:list=None): 
     states = dataset_trajectories[0:300, :1000:10].reshape(-1, obs_dim)
@@ -865,20 +808,26 @@ def get_eval_rewards(fre_network, eval_z, to_keep:list=None):
 
 
 
+
+def timestep2obs(timestep):
+    obs = np.concatenate([v if len(v.shape) != 0 else v.reshape(-1) for k, v in timestep.observation.items()])
+    return obs
+
+
 def run_test(fre_network, iql_agent, benchmark_id, num_evals, num_eval_anchors):
 
 
     benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
 
     produced_trajectories = []
+    produced_trajectories_physics = []
+    
     for _ in range(num_evals):
         
 
-        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
-        encode_obs = random_states[:, :128, :].to(device)
+        reward_params, encode_obs, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
+        encode_obs = encode_obs.to(device)
 
-        # encode_rewards = random_states_rewards[:, :128, None].to(device)
-        # decode_rewards = random_states_rewards[:, 128:, None].to(device)
 
         encode_rewards = benchmark_reward_function(encode_obs.cpu(), benchmark_param).unsqueeze(-1).to(device)
 
@@ -889,43 +838,71 @@ def run_test(fre_network, iql_agent, benchmark_id, num_evals, num_eval_anchors):
             
             
             
-        env.reset()
-        location = (20, 15)
-        start_state = reset_to_location(env, location)
-        start_state = normalize_dataset_coords(start_state)[..., :]
-        state = start_state
-
-        tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
+        timestep = env.reset()        
+        state = timestep2obs(timestep)
+        state = normalize_dataset_coords(state)
     
-    
-        produced_trajectory = []    
+        produced_trajectory = []   
+        produced_trajectory_physics = [] 
 
-        for step in tqdm(range(2000)):
+
+        for step in tqdm(range(1000)):
             
-            produced_trajectory.append(state)
+            physics = env.physics.get_state()
+            
+            produced_trajectory_physics.append(physics)
+            
+            if ENV_NAME == 'walker':
+                horizontal_velocity = env.physics.horizontal_velocity()
+                torso_upright = env.physics.torso_upright()
+                torso_height = env.physics.torso_height()
+                aux = np.array([horizontal_velocity, torso_upright, torso_height])
+
+            elif ENV_NAME == 'cheetah':
+                horizontal_velocity = env.physics.speed()
+                aux = np.array([horizontal_velocity])
+            
+            observation_aux = np.concatenate([state, aux])
+            
+            produced_trajectory.append(observation_aux)
+            
             
             with torch.no_grad():
                 tensor_state = torch.tensor(state).reshape(1, -1).to(device).float()
+                
+                if ENV_NAME == 'cheetah':
+                    tensor_state[..., -1:] = 0
+                elif ENV_NAME == 'walker':
+                    tensor_state[..., -3:] = 0
+                
                 dist = iql_agent.get_actor(w_mean, tensor_state)
                 action = dist.loc.cpu()
                 action = np.array(action[0]).clip(-1, 1)
 
-                
-            new_state, _, _, _ = env.step(action)
+            timestep = env.step(action)
             
-            state = normalize_dataset_coords(new_state)[..., :]
+            next_state = timestep2obs(timestep)
+            state = normalize_dataset_coords(next_state)
+            
             
         produced_trajectory = np.stack(produced_trajectory)
+        produced_trajectory_physics = np.stack(produced_trajectory_physics)
+                
         produced_trajectories.append(produced_trajectory)
+        produced_trajectories_physics.append(produced_trajectory_physics)
     
     produced_trajectories = np.stack(produced_trajectories)
+    produced_trajectories_physics = np.stack(produced_trajectories_physics)
+    
 
-    return produced_trajectories, w_mean
+    return produced_trajectories, produced_trajectories_physics, w_mean
 
 
 
 
-def run_benchmark(fre_network, iql_agent, steps):
+
+
+def run_benchmark(fre_network, iql_agent, steps, num_evals):
     fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
 
     
@@ -936,21 +913,29 @@ def run_benchmark(fre_network, iql_agent, steps):
         benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
         print(benchmark_test_label)
         
-        produced_trajectory, w_mean = run_test(fre_network, iql_agent, benchmark_id=benchmark_id, num_evals=5, num_eval_anchors=128)
+        produced_trajectory, produced_trajectory_physics, w_mean = run_test(fre_network, iql_agent, benchmark_id=benchmark_id, num_evals=num_evals, num_eval_anchors=128)
         
 
         eval_states, eval_rewards = get_eval_rewards(fre_network, w_mean)
         real_eval_rewards = benchmark_reward_function(eval_states, benchmark_param)
 
-        axs[benchmark_id, 0].scatter(eval_states[..., 0], eval_states[..., 1], c=real_eval_rewards)
-        axs[benchmark_id, 1].scatter(eval_states[..., 0], eval_states[..., 1], c=eval_rewards)
-        axs[benchmark_id, 2].scatter(produced_trajectory[..., 0], produced_trajectory[..., 1], c='red', s=5)
-        
-        add_largest_maze_walls(axs[benchmark_id, 0])
-        add_largest_maze_walls(axs[benchmark_id, 1])
-        add_largest_maze_walls(axs[benchmark_id, 2])
-        
-        # plt.title(f'{benchmark_test_label}')
+        if ENV_NAME == 'cheetah':
+            axs[benchmark_id, 0].scatter(eval_states[..., 8], eval_states[..., 17], c=real_eval_rewards)
+            axs[benchmark_id, 1].scatter(eval_states[..., 8], eval_states[..., 17], c=eval_rewards)
+            axs[benchmark_id, 2].scatter(
+                produced_trajectory_physics[..., 0],
+                torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
+                c='red', s=1
+            )
+        elif ENV_NAME == 'walker':
+            axs[benchmark_id, 0].scatter(eval_states[..., 16], eval_states[..., 24], c=real_eval_rewards)
+            axs[benchmark_id, 1].scatter(eval_states[..., 16], eval_states[..., 24], c=eval_rewards)
+            axs[benchmark_id, 2].scatter(
+                produced_trajectory_physics[..., 1],
+                torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
+                c='red', s=1
+            )
+            
         axs[benchmark_id, 0].set_title(f'{benchmark_test_label}')
         axs[benchmark_id, 1].set_title(f'Reconstructed Reward Function')
         axs[benchmark_id, 2].set_title(f'Agent Trajectory')
@@ -972,7 +957,7 @@ def run_benchmark(fre_network, iql_agent, steps):
         benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
         
 
-        trajectory_states = torch.tensor(all_produced_trajectories[benchmark_id]).reshape(1, -1, 29)
+        trajectory_states = torch.tensor(all_produced_trajectories[benchmark_id]).reshape(1, -1, STATE_DIM)
         trajectory_states_rewards = benchmark_reward_function(trajectory_states, benchmark_param).float()
         trajectory_states_rewards = trajectory_states_rewards.reshape(
             all_produced_trajectories.shape[1],
@@ -987,6 +972,7 @@ def run_benchmark(fre_network, iql_agent, steps):
         print('\tRewards:', trajectory_rewards.tolist())
         print('\tmean:', trajectory_rewards.mean().item())
         print('\tstd:', trajectory_rewards.std().item())
+
 
 
 
@@ -1018,7 +1004,6 @@ def main(args):
     
         
     fre_network = FRENetwork(obs_len=obs_dim).to(device)
-    fre_network.load_state_dict(torch.load('shared_models/offline_fre-fre_network.pth'))
     optimimizer = torch.optim.Adam(fre_network.parameters(), lr=0.001)
 
     reward_losses = []
@@ -1031,7 +1016,7 @@ def main(args):
     num_encode_states = 128
     num_decode_states = 128
 
-    for i in tqdm(range(0)):
+    for i in tqdm(range(args.encoder_training_steps)):
         
         reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
         
@@ -1074,40 +1059,57 @@ def main(args):
             # axs[0].set_xscale('log')
             axs[0].set_ylim(0, 0.5)
             axs[1].plot(kl_losses)
-            plt.show()
+            plt.savefig(f"{args.LOGS_FOLDER}/encoder_training_losses.png")
+            plt.close()
+            
+    
+    torch.save(fre_network.state_dict(), f"{args.MODEL_SAVE_FOLDER}/fre_network.pth")
+    
+        
     
     ################################################################################################################ 
     
     num_eval_states = 10_000
+    fig, axs = plt.subplots(len(benchmarks), 2, figsize=(10, 4*len(benchmarks)))
+    
+    for benchmark_id in range(len(benchmarks)):
 
-    reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=(128+num_eval_states))
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=(128+num_eval_states))
 
-    encode_obs = random_states[:, :128, :].to(device)
-    decode_obs = random_states[:, 128:, :].to(device)
+        encode_obs = random_states[:, :128, :].to(device)
+        decode_obs = random_states[:, 128:, :].to(device)
 
-    encode_rewards = random_states_rewards[:, :128, None].to(device)
-    decode_rewards = random_states_rewards[:, 128:, None].to(device)
+        encode_rewards = random_states_rewards[:, :128, None].to(device)
+        decode_rewards = random_states_rewards[:, 128:, None].to(device)
 
-
-    reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
-
-    with torch.no_grad():
-        w_mean, w_log_std = fre_network.get_transformer_encoding(reward_state_pairs)
-
-        # Calculate the loss:
-
-        w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
-        # w = w_mean
         
-        rewards_pred = fre_network.get_reward_pred(w, decode_obs)
+        encode_rewards = benchmarks[benchmark_id][0](encode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
+        decode_rewards = benchmarks[benchmark_id][0](decode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
+
+                
+        # encode_rewards, goals = goal_rewards(encode_obs, goals=None)
+        # decode_rewards, goals = goal_rewards(decode_obs, goals=goals)
+
+        reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
+
+        with torch.no_grad():
+            w_mean, w_log_std = fre_network.get_transformer_encoding(reward_state_pairs)
+
+            # Calculate the loss:
+
+            w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
+            # w = w_mean
+            
+            rewards_pred = fre_network.get_reward_pred(w, decode_obs)
 
 
-    # [168]:
+        # [168]:
 
 
-    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-    axs[0].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=rewards_pred.cpu())
-    axs[1].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=decode_rewards.cpu())
+        
+        axs[benchmark_id, 0].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=rewards_pred.cpu())
+        axs[benchmark_id, 1].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=decode_rewards.cpu())
+        
     plt.savefig(f"{args.LOGS_FOLDER}/FRE_reconstruction.png")
     
     
@@ -1115,7 +1117,8 @@ def main(args):
 
 
         
-    iql_agent = IQL(state_dim=obs_dim, action_dim=8, args=args).to(device)
+    iql_agent = IQL(state_dim=STATE_DIM - AUX_DIM, action_dim=ACTION_DIM, args=args).to(device)
+
 
     actor_losses = []
     v_losses, q_losses = [], []
@@ -1140,26 +1143,33 @@ def main(args):
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
 
         
-        batch = get_iql_training_data(
-            batch_size=iql_batch_size,
-            num_states=iql_num_states,
-            in_target_states_ratio=0.2,
-            topk=50,
-            num_random_samples=128
-        )
-        
-        random_states = batch['sampled_states']
-        random_states_rewards = batch['sampled_states_rewards']
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=iql_batch_size, num_random_samples=128)
         encode_obs = random_states[:, :128, :].to(device)
         encode_rewards = random_states_rewards[:, :128, None].to(device)
         reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
-
+        
+        
+        batch = get_iql_training_data(
+            batch_size=iql_batch_size, 
+            num_states=iql_num_states
+        )
         
         with torch.no_grad():
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)   
+            batch['rewards'] = get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
+
             
 
         # Implicit Q-Learning
+        
+        if ENV_NAME == 'cheetah':
+            batch['states'] = batch['states'][..., :-1]
+            batch['next_states'] = batch['next_states'][..., :-1]
+        elif ENV_NAME == 'walker':
+            batch['states'] = batch['states'][..., :-3]
+            batch['next_states'] = batch['next_states'][..., :-3]
+        
+        
         w_target = w_mean.unsqueeze(1).repeat(1, batch['states'].shape[1], 1)
         
         with torch.no_grad():
@@ -1173,7 +1183,7 @@ def main(args):
         # Value Loss: Update V towards expectile of min(q1, q2).
         
         v = iql_agent.get_value(w_target, batch['states'])
-        adv = target_q - v
+        adv = target_q - v    
         v_loss = expectile_loss(adv, config['expectile'])
         v_loss = v_loss.mean()
 
@@ -1231,7 +1241,16 @@ def main(args):
             'mse_error': mse_error,
         }
 
-        ########################################################################################        
+        ########################################################################################
+        
+        # loss = value_loss + actor_loss
+        
+        # optimizer.zero_grad()
+        # loss.backward()
+        # optimizer.step()
+
+        
+        
         
         actor_losses.append(actor_loss.item())
         v_losses.append(v_loss.item())
@@ -1265,7 +1284,7 @@ def main(args):
             plt.close()
             
         if timestep % (args.iql_training_steps // 10) == 0:
-            run_benchmark(fre_network, iql_agent, steps=timestep)
+            run_benchmark(fre_network, iql_agent, steps=timestep, num_evals=args.num_evals)
             
         if timestep % (args.iql_training_steps // 10) == 0:
             torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
@@ -1290,22 +1309,21 @@ from datetime import datetime
 
 def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
-    parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')
+    parser.add_argument('--encoder_training_steps', type=int, default=100_000)
+    parser.add_argument('--iql_training_steps', type=int, default=100_000)
+    parser.add_argument('--num_evals', type=int, default=5)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = get_args()
     print(args)
-    
-    for key, value in vars(args).items():
-        print(f'{key}: {value}')
         
         
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'fre_iql+topk_trajectories'
+    exp_name = f'fre_iql-dmc-{ENV_NAME}'
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
@@ -1318,6 +1336,7 @@ if __name__ == "__main__":
     
     args.LOGS_FOLDER = LOGS_FOLDER
     args.MODEL_SAVE_FOLDER = MODEL_SAVE_FOLDER
+    args.ENV_NAME = ENV_NAME
     
     for key, value in vars(args).items():
         print(f'{key}: {value}')
