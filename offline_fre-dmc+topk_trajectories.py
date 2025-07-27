@@ -22,7 +22,7 @@ device
 
 # [2]:
 
-ENV_NAME = 'cheetah' # cheetah | walker
+ENV_NAME = 'walker' # cheetah | walker
 
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
@@ -94,27 +94,9 @@ dataset_std = dataset_trajectories.std([0, 1])
 
 def normalize_dataset_coords(dataset_, features_to_consider_only=False):
     return dataset_
-    is_numpy = isinstance(dataset_, np.ndarray)
-    if is_numpy: dataset_ = torch.tensor(dataset_)
-    dataset = dataset_.clone()
-    if not features_to_consider_only:
-        dataset = (dataset - dataset_mean) / dataset_std
-    else:
-        dataset = (dataset - dataset_mean[FEATURES_TO_CONSIDER]) / dataset_std[FEATURES_TO_CONSIDER]
-    if is_numpy: dataset = np.array(dataset.cpu())
-    return dataset
 
 def denormalize_dataset_coords(dataset_, features_to_consider_only=False):
     return dataset_
-    is_numpy = isinstance(dataset_, np.ndarray)
-    if is_numpy: dataset_ = torch.tensor(dataset_)
-    dataset = dataset_.clone()
-    if not features_to_consider_only:
-        dataset = dataset * dataset_std + dataset_mean
-    else:
-        dataset = dataset * dataset_std[FEATURES_TO_CONSIDER] + dataset_mean[FEATURES_TO_CONSIDER]
-    if is_numpy: dataset = np.array(dataset.cpu())
-    return dataset
 
 dataset_trajectories = normalize_dataset_coords(dataset_trajectories)
 dataset_trajectories_cuda = dataset_trajectories.to(device)
@@ -1175,22 +1157,153 @@ def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
 # [211]:
 
 
-def get_iql_training_data(batch_size, num_states):
 
-    trajectory_idx = torch.randint(0, num_trajectories, (batch_size*num_states,))
-    state_idx = torch.randint(0, len_trajectory, (batch_size*num_states,)) % (len_trajectory - 1)
 
-    states = dataset_trajectories[trajectory_idx, state_idx].reshape(batch_size, num_states, obs_dim)
-    next_states = dataset_trajectories[trajectory_idx, state_idx+1].reshape(batch_size, num_states, obs_dim)
-    actions = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, num_states, ACTION_DIM)
-    masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, num_states, 1)
+def get_trajectory_scores(args, reward_generator, reward_params, num_considered_states=100, gamma=0.99, topk=50, rg_mask=None, num_considered_trajectories=10000):
     
+    batch_size = reward_params.shape[0]
+    
+    trajectories_scores = torch.zeros((batch_size, num_trajectories), device=device)
+
+    trajectory_idx = torch.randperm(num_trajectories)[:num_considered_trajectories]
+    state_idx = torch.linspace(0, len_trajectory-1, num_considered_states).long()
+    
+    x = dataset_trajectories_cuda[trajectory_idx][:, state_idx]
+    # x = dataset_trajectories_cuda[:, state_idx]
+
+    
+
+    for b in range(batch_size):
+        
+        if args.method == 'fre':
+            param = reward_params[b]
+            if (param[0] == 2):
+                rewards, _ = mlp_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
+            elif (param[0] == 1):
+                rewards, _ = linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
+            elif (param[0] == 0):
+                rewards, _ = goal_rewards(obs=x, goals=param[1:obs_dim+1].unsqueeze(0).repeat(x.shape[0], 1))
+        
+        elif args.method == 'rg':
+            param = reward_params[[b]]
+            mask = rg_mask[[b]]
+            x_ = x.flatten(0, 1).unsqueeze(0)
+            # print(param.shape, mask.shape, x_.shape)
+            rewards = get_reward_RG(reward_generator, param, mask, x_)
+            rewards = rewards.reshape(num_considered_trajectories, num_considered_states)
+
+        # print(rewards.mean())
+
+        discounts = torch.tensor([gamma ** (t*(len_trajectory//num_considered_states)) for t in range(num_considered_states, 0, -1)], device=device)
+        discounts = discounts.unsqueeze(0).repeat(num_considered_trajectories, 1)
+        cum_rewards = (rewards * discounts).sum(dim=1)
+        
+        # scores = (cum_rewards >= torch.topk(cum_rewards, topk).values.min()).float()
+        
+        scores = torch.zeros((num_trajectories,), dtype=torch.float)
+        topk_relative_trajectory_idx = cum_rewards.argsort(descending=True)[:topk].cpu()
+        abs_trajectory_idx = trajectory_idx[topk_relative_trajectory_idx].cpu()
+        
+        # print(abs_trajectory_idx)
+        scores[abs_trajectory_idx] = 1.
+                
+                        
+        trajectories_scores[b] = scores
+
+        # gc.collect() 
+        # torch.cuda.empty_cache()
+        # torch.cuda.ipc_collect()  
+    
+    return trajectories_scores
+
+
+
+def get_iql_training_data(args, reward_generator, batch_size, num_states, in_target_states_ratio, topk, num_random_samples=1, num_considered_trajectories=10000, num_considered_states=100):
+    # batch_size = 16
+    # num_states = 1024
+    # in_target_states_ratio = 0.8
+    # topk = 50
+    # num_random_samples = 1
+
+    if args.method == 'fre':
+        reward_params, sampled_states, sampled_states_rewards = sample_reward_function_fre(batch_size=batch_size, num_random_samples=num_random_samples)
+        mask = None
+    elif args.method == 'rg':
+        reward_params, sampled_states, sampled_states_rewards, mask = sample_reward_function_fre_RG(
+            reward_generator=reward_generator,
+            batch_size=batch_size, num_random_samples=num_random_samples
+        )
+        
+
+    trajectories_scores = get_trajectory_scores(
+        args,
+        reward_generator,
+        reward_params, 
+        num_considered_states=num_considered_states, 
+        topk=topk, 
+        rg_mask=mask,
+        num_considered_trajectories=num_considered_trajectories
+    ).cpu()
+
+    num_target_states = int(num_states * in_target_states_ratio)
+    num_random_states = num_states - num_target_states
+
+
+    # target_trajectory_idx = target_trajectory_idx_.unsqueeze(1).repeat(1, num_target_states).reshape(-1)
+    target_trajectory_idx_ = torch.nonzero(trajectories_scores)[:, 1].reshape(batch_size, topk)
+
+    target_trajectory_idx = target_trajectory_idx_[
+        torch.arange(0, batch_size).unsqueeze(1).repeat(1, num_target_states).flatten(),
+        torch.randint(0, topk, (batch_size*num_target_states,))
+    ]
+
+    target_states_idx = torch.randint(0, len_trajectory-1, (num_target_states*batch_size,))
+
+    target_states = dataset_trajectories[target_trajectory_idx, target_states_idx].reshape(batch_size, num_target_states, -1)
+    target_next_states = dataset_trajectories[target_trajectory_idx, target_states_idx + 1].reshape(batch_size, num_target_states, -1)
+    target_actions = dataset_actions[target_trajectory_idx, target_states_idx].reshape(batch_size, num_target_states, -1)
+    # target_rewards = torch.ones((batch_size, num_target_states), dtype=torch.float)
+    
+    if args.method == 'fre':
+        target_rewards = get_reward(reward_params, target_states.to(device)).cpu()
+    elif args.method == 'rg':
+        target_rewards = get_reward_RG(reward_generator, reward_params, mask, target_states.to(device)).cpu()
+    target_rewards = (target_rewards - target_rewards.min()) / (target_rewards.max() - target_rewards.min() + 1e-5)
+    
+    target_masks = ~dataset_timeouts[target_trajectory_idx, target_states_idx + 1].reshape(batch_size, num_target_states)
+
+
+    random_trajectory_idx = torch.randint(0, num_trajectories, (num_random_states*batch_size,))
+    random_states_idx = torch.randint(0, len_trajectory-1, (num_random_states*batch_size,))
+
+    random_states = dataset_trajectories[random_trajectory_idx, random_states_idx].reshape(batch_size, num_random_states, -1)
+    random_next_states = dataset_trajectories[random_trajectory_idx, random_states_idx + 1].reshape(batch_size, num_random_states, -1)
+    random_actions = dataset_actions[random_trajectory_idx, random_states_idx].reshape(batch_size, num_random_states, -1)
+    random_rewards = torch.zeros((batch_size, num_random_states), dtype=torch.float)
+    random_masks = ~dataset_timeouts[random_trajectory_idx, random_states_idx + 1].reshape(batch_size, num_random_states)
+
+
+    states = torch.concat((target_states, random_states), dim=1)
+    next_states = torch.concat((target_next_states, random_next_states), dim=1)
+    actions = torch.concat((target_actions, random_actions), dim=1)
+    rewards = torch.concat((target_rewards, random_rewards), dim=1).unsqueeze(-1)
+    masks = torch.concat((target_masks, random_masks), dim=1).unsqueeze(-1)
+
     return {
+        'reward_params': reward_params.to(device),
         'states': states.to(device),
+        'next_states': next_states.to(device), 
         'actions': actions.to(device),
-        'next_states': next_states.to(device),
+        'rewards': rewards.to(device),
         'masks': masks.to(device),
+        
+        'sampled_states': sampled_states.cpu(),
+        'sampled_states_rewards': sampled_states_rewards.cpu(),
+        'target_trajectory_idx_': target_trajectory_idx_.cpu()
     }
+
+
+
 
 
 
@@ -1388,6 +1501,7 @@ def run_benchmark(fre_network, iql_agent, steps, num_evals):
 
 def main(args):
     
+    reward_generator = None
     
     if args.method == 'rg':
         rg_model = RewardGeneratorTransformer(obs_len=obs_dim)
@@ -1602,40 +1716,28 @@ def main(args):
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
 
         
-        if args.method == 'fre':
-            reward_params, random_states, random_states_rewards = sample_reward_function_fre(
-                batch_size=iql_batch_size, num_random_samples=128
-            )
-        elif args.method == 'rg':
-            reward_params, random_states, random_states_rewards, mask = sample_reward_function_fre_RG(
-                reward_generator, 
-                batch_size=iql_batch_size, num_random_samples=128
-            )
+        batch = get_iql_training_data(
+            args=args,
+            reward_generator=reward_generator,
+            batch_size=iql_batch_size,
+            num_states=iql_num_states,
+            in_target_states_ratio=0.3,
+            topk=50,
+            num_random_samples=128,
+            num_considered_trajectories=5000,
+            num_considered_states=10
+        )
         
-        
-        
+        random_states = batch['sampled_states']
+        random_states_rewards = batch['sampled_states_rewards']
         encode_obs = random_states[:, :128, :].to(device)
         encode_rewards = random_states_rewards[:, :128, None].to(device)
         reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
-        
-        
-        batch = get_iql_training_data(
-            batch_size=iql_batch_size, 
-            num_states=iql_num_states
-        )
+
         
         with torch.no_grad():
-            w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)
-            # w_mean = torch.zeros_like(w_mean) ############################################################################### !!!!!!!!!
-        
-            if args.method == 'fre':
-                batch['rewards'] = get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
-            elif args.method == 'rg':
-                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
-            
-            
-            # batch['rewards'] = benchmarks[3][0](batch['states'].flatten(0, 1).unsqueeze(0), 2).reshape(iql_batch_size, iql_num_states, 1)
-            
+            w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)    
+                        
 
         # Implicit Q-Learning
         
@@ -1785,7 +1887,7 @@ import os
 from datetime import datetime
 
 def get_args():
-    # python offline_fre-dmc.py --reward_generator_training_steps 100 --encoder_training_steps 100 --iql_training_steps 100 --num_evals 1
+    # python offline_fre-dmc+topk_trajectories.py --reward_generator_training_steps 100 --encoder_training_steps 100 --iql_training_steps 100 --num_evals 1 --method rg
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--reward_generator_training_steps', type=int, required=True)
     parser.add_argument('--encoder_training_steps', type=int, required=True)

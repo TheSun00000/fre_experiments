@@ -24,8 +24,12 @@ nvidia-smi
 ls /usr/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
+python offline_fre-dmc.py --reward_generator_training_steps 15000 --encoder_training_steps 100000 --iql_training_steps 300000 --num_evals 5 --method rg --file_suffix without_aux
+# python offline_fre-dmc.py --reward_generator_training_steps 15000 --encoder_training_steps 100000 --iql_training_steps 300000 --num_evals 5 --method fre --file_suffix only_linear
 
-python offline_fre+topk_trajectories.py --iql_training_steps 100000
+# python offline_fre-dmc.py --encoder_training_steps 0 --iql_training_steps 300000 --num_evals 5
+
+# python offline_fre+topk_trajectories.py --iql_training_steps 100000
 # python offline_fre.py --iql_training_steps 1000000
 # python offline_fre+reward_generator.py --iql_training_steps 100000
 # python offline_fre+traj_score.py --iql_training_steps 300000
