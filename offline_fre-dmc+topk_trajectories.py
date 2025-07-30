@@ -22,7 +22,7 @@ device
 
 # [2]:
 
-ENV_NAME = 'walker' # cheetah | walker
+ENV_NAME = 'cheetah' # cheetah | walker
 
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
@@ -1907,7 +1907,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'fre_iql-dmc-{ENV_NAME}'
+    exp_name = f'fre_iql-dmc-topk-{ENV_NAME}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         

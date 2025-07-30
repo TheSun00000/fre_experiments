@@ -168,6 +168,20 @@ class FRENetwork(nn.Module):
             nn.Mish(),
             nn.Linear(512, 1),
         )
+        
+        self.mask_predict = nn.Sequential(
+            nn.Linear(self.reward_pairs_emb_dim, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.Mish(),
+            nn.Linear(512, self.obs_len),
+            nn.Sigmoid(),
+        )
 
 
     def get_transformer_encoding(self, reward_state_pairs):
@@ -194,6 +208,10 @@ class FRENetwork(nn.Module):
     
     def get_reward_pred(self, w, reward_states): # Reward Pairs: [batch, reward_pairs, obs_dim + 1]
         z_expand = w.unsqueeze(1) # [batch, 1, emb_dim]
+        
+        mask = self.mask_predict(z_expand)
+        reward_states = reward_states * mask
+        
         z_expand = z_expand.repeat(1, reward_states.shape[1], 1)        
         
         w_and_obs = torch.concatenate([z_expand, reward_states], axis=-1)
@@ -1111,7 +1129,7 @@ def main(args):
     num_encode_states = 128
     num_decode_states = 128
 
-    for i in tqdm(range(10_000), desc='Fre network training'):
+    for i in tqdm(range(args.encoder_training_steps), desc='Fre network training'):
         
         reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
         
@@ -1161,44 +1179,51 @@ def main(args):
 
     ################################################################################################################ 
     
+    
     num_eval_states = 10_000
+    fig, axs = plt.subplots(len(benchmarks), 2, figsize=(10, 4*len(benchmarks)))
+    
+    for benchmark_id in range(len(benchmarks)):
 
-    reward_params, random_states, random_states_rewards = sample_reward_function_fre(batch_size=1, num_random_samples=(128+num_eval_states))
+        reward_params, random_states, random_states_rewards = sample_reward_function_fre(
+            batch_size=1, num_random_samples=(128+num_eval_states)
+        )
 
-    encode_obs = random_states[:, :128, :].to(device)
-    decode_obs = random_states[:, 128:, :].to(device)
+        encode_obs = random_states[:, :128, :].to(device)
+        decode_obs = random_states[:, 128:, :].to(device)
 
-    encode_rewards = random_states_rewards[:, :128, None].to(device)
-    decode_rewards = random_states_rewards[:, 128:, None].to(device)
+        encode_rewards = random_states_rewards[:, :128, None].to(device)
+        decode_rewards = random_states_rewards[:, 128:, None].to(device)
 
-    # benchmark_id = 0
-    # encode_rewards = benchmarks[benchmark_id][0](encode_obs.cpu(), np.array([0, 15])).unsqueeze(-1).to(device)
-    # decode_rewards = benchmarks[benchmark_id][0](decode_obs.cpu(), np.array([0, 15])).unsqueeze(-1).to(device)
-
-            
-    # encode_rewards, goals = goal_rewards(encode_obs, goals=None)
-    # decode_rewards, goals = goal_rewards(decode_obs, goals=goals)
-
-    reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
-
-    with torch.no_grad():
-        w_mean, w_log_std = fre_network.get_transformer_encoding(reward_state_pairs)
-
-        # Calculate the loss:
-
-        w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
-        # w = w_mean
         
-        rewards_pred = fre_network.get_reward_pred(w, decode_obs)
+        encode_rewards = benchmarks[benchmark_id][0](encode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
+        decode_rewards = benchmarks[benchmark_id][0](decode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
+
+                
+        # encode_rewards, goals = goal_rewards(encode_obs, goals=None)
+        # decode_rewards, goals = goal_rewards(decode_obs, goals=goals)
+
+        reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
+
+        with torch.no_grad():
+            w_mean, w_log_std = fre_network.get_transformer_encoding(reward_state_pairs)
+
+            # Calculate the loss:
+
+            w = w_mean + torch.normal(0, 1, size=w_mean.shape, device=device) * torch.exp(w_log_std)
+            # w = w_mean
+            
+            rewards_pred = fre_network.get_reward_pred(w, decode_obs)
 
 
-    # [168]:
+        # [168]:
 
 
-    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
-    axs[0].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=rewards_pred.cpu())
-    axs[1].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=decode_rewards.cpu())
+        axs[benchmark_id, 0].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=decode_rewards.cpu())
+        axs[benchmark_id, 1].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=rewards_pred.cpu())
+
     plt.savefig(f"{args.LOGS_FOLDER}/FRE_reconstruction.png")
+    
     
     
     ################################################################################################################
@@ -1391,6 +1416,8 @@ from datetime import datetime
 def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--iql_training_steps', type=int, default=100_000, help='Number of training vae epochs')
+    parser.add_argument('--encoder_training_steps', type=int, required=True)
+    parser.add_argument('--file_suffix', type=str)
     return parser.parse_args()
 
 
@@ -1406,6 +1433,8 @@ if __name__ == "__main__":
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
     exp_name = f'fre_iql+rg'
+    if args.file_suffix:
+        exp_name = f'{exp_name}-{args.file_suffix}'
 
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
