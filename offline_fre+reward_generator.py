@@ -566,9 +566,9 @@ def sample_reward_function_fre(batch_size, num_random_samples):
 
 
     # num_anchors = 16
-    mask = reward_generator.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.3)
-    mask = torch.zeros_like(mask)
-    mask[..., [0, 1]] = 1
+    mask = reward_generator.generate_boolean_mask(batch_size, len(FEATURES_TO_CONSIDER), p=0.9)
+    # mask = torch.zeros_like(mask)
+    # mask[..., [0, 1]] = 1
     
 
     with torch.no_grad():
