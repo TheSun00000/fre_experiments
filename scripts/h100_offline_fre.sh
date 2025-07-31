@@ -25,8 +25,8 @@ ls /usr/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
 
-python main.py --env_name walker --method fre --reward_generator_training_steps 20000 --encoder_training_steps 50000 --iql_training_steps 300000 --num_evals 5
-python main.py --env_name walker --method rg  --reward_generator_training_steps 20000 --encoder_training_steps 50000 --iql_training_steps 300000 --num_evals 5
+python main.py --env_name cheetah --method fre --reward_generator_training_steps 20000 --encoder_training_steps 50000 --iql_training_steps 300000 --num_evals 5
+python main.py --env_name cheetah --method rg  --reward_generator_training_steps 20000 --encoder_training_steps 50000 --iql_training_steps 300000 --num_evals 5
 
 
 

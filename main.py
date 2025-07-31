@@ -564,9 +564,10 @@ class RewardGeneratorTransformer(nn.Module):
     
     
 class RewardGenerator:
-    def __init__(self, fre_network: RewardGeneratorTransformer, dataset_trajectories):
+    def __init__(self, fre_network: RewardGeneratorTransformer, dataset_trajectories, dropout):
         
         self.dataset_trajectories = dataset_trajectories
+        self.dropout = dropout
         
         self.fre_network = fre_network.to(device)
         self.optimimizer = torch.optim.Adam(self.fre_network.parameters(), lr=0.001)
@@ -640,10 +641,10 @@ class RewardGenerator:
         # anchors_rewards[reward_mask] = candidates[torch.randint(0, candidates.shape[0], (reward_mask.sum(),))]
         
         # Goal reaching reward functions:
-        # random_rows = torch.tensor([n for n in range(batch_size) if random.random() < 0.3], dtype=torch.long)
-        # anchors_rewards[random_rows] = -1.
-        # anchors_rewards[random_rows, 0] = 1.
-        # reward_types[random_rows] = 0
+        random_rows = torch.tensor([n for n in range(batch_size) if random.random() < 0.3], dtype=torch.long)
+        anchors_rewards[random_rows] = -1.
+        anchors_rewards[random_rows, 0] = 1.
+        reward_types[random_rows] = 0
 
             
         # rewards[reward_mask] = torch.exp(2*(rewards[reward_mask] - 1))
@@ -661,18 +662,21 @@ class RewardGenerator:
         return (anchors, anchors_rewards, pad_mask), {'reward_types':reward_types}
     
 
-    def generate_boolean_mask(self, batch_size, length, p=0.9):
-        vecs = (torch.rand(batch_size, length) > p).bool()
-        mask = ~vecs.any(dim=1)
-        if mask.any():
-            rows = mask.nonzero(as_tuple=False).squeeze(1)
-            cols = torch.randint(0, length, (rows.size(0),))
-            vecs[rows, cols] = True
+    def generate_boolean_mask(self, batch_size, length, p=0.5):
         
-        
-        # if KEEP_ONLY_COORDS:
-        #     vecs = torch.zeros_like(vecs)
-        #     vecs[:, :2] = True
+        all_vecs = []
+        for b in range(batch_size):
+            if torch.rand(1) < 0.5:
+                vecs = (torch.rand(1, length) > 0.9).bool()
+            else:
+                vecs = (torch.rand(1, length) > p).bool()
+            mask = ~vecs.any(dim=1)
+            if mask.any():
+                rows = mask.nonzero(as_tuple=False).squeeze(1)
+                cols = torch.randint(0, length, (rows.size(0),))
+                vecs[rows, cols] = True
+            all_vecs.append(vecs)
+        vecs = torch.concat(all_vecs)
             
         return vecs * 1.
     
@@ -690,10 +694,10 @@ class RewardGenerator:
         pad_mask = pad_mask.to(device)
         
         state_dim = anchors.shape[-1]
-        mask = self.generate_boolean_mask(batch_size, state_dim, p=0.9)
-        # mask = torch.zeros_like(mask)
-        # mask[..., [0, 1]] = 1
-
+        mask = self.generate_boolean_mask(batch_size, state_dim, p=0.5)
+        if anchors.shape[-1] == 29: # antmaze
+            mask[info['reward_types'] == 0, :2] = 1
+            mask[info['reward_types'] == 0, 2:] = 0
 
         mask = mask.unsqueeze(1).repeat(1, max_num_anchors, 1)
         mask = mask.to(device)
@@ -749,6 +753,11 @@ class RewardGenerator:
         
         assert mask.shape == (batch_size, state_dim)
         
+        if anchors.shape[-1] == 29: # antmaze
+            reward_types = info['reward_types']
+            mask[reward_types == 0, :2] = 1
+            mask[reward_types == 0, 2:] = 0
+        
         mask = mask.unsqueeze(1).repeat(1, max_num_anchors, 1)
         mask = mask.to(device)
         anchors = anchors * mask
@@ -799,16 +808,18 @@ def sample_reward_function_fre_RG(reward_generator, dataset: Dataset, batch_size
     random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
 
-    # num_anchors = 16
-    mask = reward_generator.generate_boolean_mask(batch_size, state_dim, p=0.9)
-    # mask = torch.zeros_like(mask)
-    # mask[..., [0, 1]] = 1
+    mask = reward_generator.generate_boolean_mask(batch_size, state_dim, p=reward_generator.dropout)
     
 
     with torch.no_grad():
-        reward_params, _ = reward_generator.get_z_from_random_anchors(
+        reward_params, info = reward_generator.get_z_from_random_anchors(
             batch_size, min_num_anchors=args.min_num_anchors, max_num_anchors=args.max_num_anchors, mask=mask
         )
+        
+        if state_dim == 29: # antmaze
+            reward_types = info['get_training_data:info']['reward_types']
+            mask[reward_types == 0, :2] = 1
+            mask[reward_types == 0, 2:] = 0
         
         x = random_states * mask.unsqueeze(1).repeat(1, num_random_samples, 1).to(device)
         
@@ -1556,7 +1567,8 @@ def main(args):
 
         reward_generator = RewardGenerator(
             fre_network=rg_model, 
-            dataset_trajectories=dataset_trajectories
+            dataset_trajectories=dataset_trajectories,
+            dropout=args.rg_dropout
         )
 
         vae_loss, vae_kl_loss = [], []
@@ -1693,11 +1705,11 @@ def main(args):
     for benchmark_id in range(len(benchmarks)):
 
         if args.method == 'fre':
-            reward_params, random_states, random_states_rewards = unsupervsied_rewards.sample_reward_function_fre(
+            _, random_states, _ = unsupervsied_rewards.sample_reward_function_fre(
                 batch_size=1, num_random_samples=(128+num_eval_states)
             )
         elif args.method == 'rg':
-            reward_params, random_states, random_states_rewards, mask = sample_reward_function_fre_RG(
+            _, random_states, _, mask = sample_reward_function_fre_RG(
                 reward_generator, dataset,
                 batch_size=1, num_random_samples=(128+num_eval_states)
             )
@@ -1705,8 +1717,8 @@ def main(args):
         encode_obs = random_states[:, :128, :].to(device)
         decode_obs = random_states[:, 128:, :].to(device)
 
-        encode_rewards = random_states_rewards[:, :128, None].to(device)
-        decode_rewards = random_states_rewards[:, 128:, None].to(device)
+        # encode_rewards = random_states_rewards[:, :128, None].to(device)
+        # decode_rewards = random_states_rewards[:, 128:, None].to(device)
 
         
         encode_rewards = benchmarks[benchmark_id][0](encode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
@@ -1967,12 +1979,18 @@ def get_args():
     # python offline_fre-dmc.py --reward_generator_training_steps 100 --encoder_training_steps 100 --iql_training_steps 100 --num_evals 1 --method fre
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
-    parser.add_argument('--reward_generator_training_steps', type=int, required=True)
-    parser.add_argument('--encoder_training_steps', type=int, required=True)
-    parser.add_argument('--iql_training_steps', type=int, required=True)
-    parser.add_argument('--num_evals', type=int, required=True)
     parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
+    
+    parser.add_argument('--reward_generator_training_steps', type=int, required=True)
+    parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
+    
+    parser.add_argument('--encoder_training_steps', type=int, required=True)
+    
+    parser.add_argument('--iql_training_steps', type=int, required=True)
+    
+    parser.add_argument('--num_evals', type=int, required=True)
     parser.add_argument('--file_suffix', type=str)
+    
     
     return parser.parse_args()
 
