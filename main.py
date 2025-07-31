@@ -1247,6 +1247,7 @@ def run_test_dmc(env, dataset, fre_network, iql_agent, benchmarks, benchmark_id,
             
             next_state = timestep2obs(timestep)
             # state = normalize_dataset_coords(next_state)
+            state = next_state
             
             
         produced_trajectory = np.stack(produced_trajectory)
