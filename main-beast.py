@@ -939,8 +939,8 @@ class VelocityRewardFunctionWalker:
                                         value_at_margin=0.5,
                                         sigmoid='linear')
         # move_reward[params == 0] = stand_reward[params == 0]
-        # rew = stand_reward * (5*move_reward + 1) / 6
-        rew = (5*move_reward + 1) / 6
+        rew = stand_reward * (5*move_reward + 1) / 6
+        # rew = (5*move_reward + 1) / 6
         
         return torch.tensor(rew[..., 0])
 
@@ -1626,7 +1626,8 @@ def main(args):
     # FRE and IQL ###################################################################################################################################
         
     fre_network = FRENetwork(obs_len=obs_len).to(device)
-    fre_network_optimimizer = torch.optim.Adam(fre_network.parameters(), lr=0.001)    
+    fre_network.load_state_dict(torch.load('models/2025-07-31_02-02-05_antmaze-fre/fre_network.pth'))
+    fre_network_optimimizer = torch.optim.Adam(fre_network.parameters(), lr=0.0005)
 
     if args.env_name == 'antmaze':
         iql_agent = IQL(state_dim=args.state_dim, action_dim=args.action_dim, args=args).to(device)
@@ -1868,7 +1869,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'{args.env_name}-{args.method}'
+    exp_name = f'beast-{args.env_name}-{args.method}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         

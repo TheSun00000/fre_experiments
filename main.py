@@ -939,8 +939,8 @@ class VelocityRewardFunctionWalker:
                                         value_at_margin=0.5,
                                         sigmoid='linear')
         # move_reward[params == 0] = stand_reward[params == 0]
-        # rew = stand_reward * (5*move_reward + 1) / 6
-        rew = (5*move_reward + 1) / 6
+        rew = stand_reward * (5*move_reward + 1) / 6
+        # rew = (5*move_reward + 1) / 6
         
         return torch.tensor(rew[..., 0])
 
