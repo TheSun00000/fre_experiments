@@ -1563,7 +1563,9 @@ def main(args):
             args.min_num_anchors, args.max_num_anchors = 2, 8
         
         rg_model = RewardGeneratorTransformer(obs_len=obs_len)
-        # rg_model.load_state_dict(torch.load('models/all_in_one-coords-rg_model.pth'))
+        if args.rg_checkpoint:
+            rg_model.load_state_dict(torch.load(args.rg_checkpoint))
+            print('Reward generator loaded')
 
         reward_generator = RewardGenerator(
             fre_network=rg_model, 
@@ -1626,6 +1628,9 @@ def main(args):
     # FRE ########################################################################################################################################
         
     fre_network = FRENetwork(obs_len=obs_len).to(device)
+    if args.encoder_checkpoint:
+        fre_network.load_state_dict(torch.load(args.encoder_checkpoint))
+        print('FRE encoder loaded')
     optimimizer = torch.optim.Adam(fre_network.parameters(), lr=0.001)
 
     reward_losses = []
@@ -1766,7 +1771,10 @@ def main(args):
         iql_agent = IQL(state_dim=args.state_dim-1, action_dim=args.action_dim, args=args).to(device)
     elif args.env_name == 'walker':
         iql_agent = IQL(state_dim=args.state_dim-3, action_dim=args.action_dim, args=args).to(device)
-        
+    
+    if args.iql_checkpoint:
+        iql_agent.load_state_dict(torch.load(args.iql_checkpoint))
+        print('IQL agent loaded')
 
 
     actor_losses = []
@@ -1951,10 +1959,8 @@ def main(args):
             plt.savefig(f"{args.LOGS_FOLDER}/iql_training_losses.png")
             plt.close()
             
-        if timestep % (args.iql_training_steps // 10) == 0:
-            run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)
-            
-        if timestep % (args.iql_training_steps // 10) == 0:
+        if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 10) == 0):
+            run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)            
             torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
     
     
@@ -1976,17 +1982,33 @@ import os
 from datetime import datetime
 
 def get_args():
-    # python offline_fre-dmc.py --reward_generator_training_steps 100 --encoder_training_steps 100 --iql_training_steps 100 --num_evals 1 --method fre
+
+    """
+    
+    python main.py --env_name walker --method fre \
+            --reward_generator_training_steps 20000 --rg_dropout 0.5 \
+            --encoder_training_steps 10 \
+            --iql_training_steps 2 \
+            --num_evals 5 \
+            --encoder_checkpoint models/2025-08-05_00-15-18_walker-fre/fre_network.pth \
+            --iql_checkpoint models/2025-08-05_00-15-18_walker-fre/iql_agent.pth \
+               
+    
+    """
+               
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
     parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
     
     parser.add_argument('--reward_generator_training_steps', type=int, required=True)
     parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
+    parser.add_argument('--rg_checkpoint', type=str)
     
     parser.add_argument('--encoder_training_steps', type=int, required=True)
+    parser.add_argument('--encoder_checkpoint', type=str)
     
     parser.add_argument('--iql_training_steps', type=int, required=True)
+    parser.add_argument('--iql_checkpoint', type=str)
     
     parser.add_argument('--num_evals', type=int, required=True)
     parser.add_argument('--file_suffix', type=str)
