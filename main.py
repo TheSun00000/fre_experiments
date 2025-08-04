@@ -894,7 +894,7 @@ class VelocityRewardFunctionCheetah:
                              value_at_margin=0,
                              sigmoid='linear')
         
-        return torch.tensor(rew[..., 0])
+        return torch.tensor(rew[..., 0], dtype=torch.float32)
     
     
     
@@ -942,7 +942,7 @@ class VelocityRewardFunctionWalker:
         rew = stand_reward * (5*move_reward + 1) / 6
         # rew = (5*move_reward + 1) / 6
         
-        return torch.tensor(rew[..., 0])
+        return torch.tensor(rew[..., 0], dtype=torch.float32)
 
 
 

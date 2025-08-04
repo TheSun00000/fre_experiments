@@ -32,9 +32,9 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 #                --num_evals 5
 
 
-python main.py --env_name walker --method rg \
+python main.py --env_name walker --method fre \
                --reward_generator_training_steps 20000 --rg_dropout 0.5 \
-               --encoder_training_steps 50000 \
+               --encoder_training_steps 10 \
                --iql_training_steps 300000 \
                --num_evals 5
 
