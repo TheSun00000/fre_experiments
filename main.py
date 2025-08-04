@@ -1485,7 +1485,7 @@ def main(args):
             (velocity_reward_function.compute_reward, 'vel0.1', 0.1),
             (velocity_reward_function.compute_reward, 'vel1', 1),
             (velocity_reward_function.compute_reward, 'vel4', 4),
-            (velocity_reward_function.compute_reward, 'vel8', 10),
+            (velocity_reward_function.compute_reward, 'vel8', 8),
         ]
 
     elif args.env_name == 'antmaze':
