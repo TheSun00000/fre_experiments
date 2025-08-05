@@ -1962,6 +1962,11 @@ def main(args):
         if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 10) == 0):
             run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)            
             torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
+
+    
+    if args.iql_training_steps == 0:
+        run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=0, num_evals=args.num_evals)            
+        torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
     
     
     ################################################################################################################

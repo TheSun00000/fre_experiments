@@ -26,17 +26,29 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
 
 
+python main.py --env_name cheetah --method rg \
+        --reward_generator_training_steps 0 --rg_dropout 0.5 \
+        --encoder_training_steps 0 \
+        --iql_training_steps 0 \
+        --num_evals 5 \
+        --rg_checkpoint      models/2025-07-31_15-17-24_cheetah-rg/rg_model.pth \
+        --encoder_checkpoint models/2025-07-31_15-17-24_cheetah-rg/fre_network.pth \
+        --iql_checkpoint     models/2025-07-31_15-17-24_cheetah-rg/iql_agent.pth \
+
+
 # python main-beast.py --env_name antmaze --method fre \
 #                --reward_generator_training_steps 1 --rg_dropout 0.5 \
 #                 --iql_training_steps 100000 \
 #                --num_evals 5
 
 
-python main.py --env_name walker --method fre \
-               --reward_generator_training_steps 20000 --rg_dropout 0.5 \
-               --encoder_training_steps 10 \
-               --iql_training_steps 300000 \
-               --num_evals 5
+# python main.py --env_name walker --method fre \
+#                --reward_generator_training_steps 20000 --rg_dropout 0.5 \
+#                --encoder_training_steps 50000 \
+#                --iql_training_steps 300000 \
+#                --num_evals 5
+
+
 
 
 
