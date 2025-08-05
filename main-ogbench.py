@@ -28,7 +28,6 @@ device
 class Dataset:
     trajectories: torch.Tensor
     actions: torch.Tensor
-    terminals: torch.Tensor
     timeouts: torch.Tensor
 
 
@@ -272,12 +271,29 @@ class GoalRewards:
         param.shape = (batch_size, obs_dim)
         """
         
+        if obs.shape[-1] == 29: # antmaze
+            batch_size, num_samples, obs_dim = obs.shape
+            batch_size_, obs_dim_ = goals.shape
+            assert (batch_size == batch_size_) and (obs_dim == obs_dim_)
+            
+            device = obs.device
+            
+            goals = goals.to(device)
+
+            # r = torch.norm(obs - goals.unsqueeze(-2), dim=-1) < 2
+            # r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 2
+            r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 0.5
+            r = r.float() * 2 - 1
+            r = torch.clip(r, -1, 1)
+
+            return r, goals
+            
+        
+        
         if obs.shape[-1] == 18: # cheetah
             std = torch.tensor([[0.4407440506721877, 10.070289916801876, 0.5172332956856273, 0.5601041145815341, 0.518947027289748, 0.3204431592542281, 0.5501848643154092, 0.3856393812067661, 1.9882502334402663, 1.6377168569884073, 4.308505013609855, 12.144181770553105, 13.537567521831702, 16.88983033626308, 7.715009572436841, 14.345667964212357, 10.6904255152284, 100]])
         elif obs.shape[-1] == 27: # walker
             std = torch.tensor([[0.7212967364054736, 0.6775020895964047, 0.7638155887842976, 0.6395721376821286, 0.6849394775886244, 0.7078581708129903, 0.7113168519036742, 0.6753408522523937, 0.6818095329625652, 0.7133958718133511, 0.65227578338642, 0.757622576816855, 0.7311826446274479, 0.6745824928740024, 0.36822491550384456, 2.1134839667805805, 1.813353841099317, 10.594648894374815, 17.41041469033713, 17.836743227082106, 22.399097178637533, 16.1492222730888, 15.693574546557201, 18.539929326905067, 100, 100, 100]])
-        elif obs.shape[-1] == 29: # antmaze
-            std = torch.ones((29,))
         
         batch_size, num_samples, obs_dim = obs.shape
         batch_size_, obs_dim_ = goals.shape
@@ -331,10 +347,10 @@ class UnsupervsiedReward:
         random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
         for b in range(batch_size):
-            # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
-            reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
+            reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
+            # reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
             
-            # reward_type = 0
+            reward_type = 0
             
             reward_params[b, 0] = reward_type
             if reward_type == 0:
@@ -1342,6 +1358,63 @@ def run_test_antamze(env, dataset, fre_network, iql_agent, benchmarks, benchmark
     return produced_trajectories, None, w_mean
 
 
+def run_test_antamze_ogbench(env, dataset, fre_network, iql_agent, benchmarks, benchmark_id, num_evals, num_eval_anchors):
+
+
+    benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
+
+    produced_trajectories = []
+    for _ in range(num_evals):
+
+        # _, encode_obs, _ = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
+        batch = get_iql_training_data(
+            dataset=dataset,
+            batch_size=1,
+            num_states=num_eval_anchors
+        )
+        encode_obs = batch['states'].to(device)
+
+        encode_obs[0, 0, :2] = torch.tensor(benchmarks[benchmark_id][2]).float()
+        encode_rewards = benchmark_reward_function(encode_obs.cpu(), benchmark_param).unsqueeze(-1).to(device)
+
+        reward_state_pairs = torch.concatenate((encode_obs, encode_rewards), axis=-1)
+
+        with torch.no_grad():
+            w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)  
+            
+            
+            
+        start_state, _ = env.reset(options={'task_id':benchmark_id+1})
+        state = start_state
+
+        tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
+    
+    
+        produced_trajectory = []    
+
+        for step in tqdm(range(2000)):
+            
+            produced_trajectory.append(state)
+            
+            with torch.no_grad():
+                tensor_state = torch.tensor(state).reshape(1, -1).to(device).float()
+                dist = iql_agent.get_actor(w_mean, tensor_state)
+                action = dist.loc.cpu()
+                action = np.array(action[0]).clip(-1, 1)
+
+                
+            new_state, _, _, _, _ = env.step(action)
+            
+            state = new_state
+            
+        produced_trajectory = np.stack(produced_trajectory)
+        produced_trajectories.append(produced_trajectory)
+    
+    produced_trajectories = np.stack(produced_trajectories)
+
+    return produced_trajectories, None, w_mean
+
+
 
 
 
@@ -1364,6 +1437,10 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
             produced_trajectory, _, w_mean = run_test_antamze(
                 env, dataset, fre_network, iql_agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals, num_eval_anchors=128
             )
+        elif args.env_name == 'antmaze-large-navigate-v0':
+            produced_trajectory, _, w_mean = run_test_antamze_ogbench(
+                env, dataset, fre_network, iql_agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals, num_eval_anchors=128
+            )
 
         eval_states, eval_rewards = get_eval_rewards(dataset, fre_network, w_mean)
         real_eval_rewards = benchmark_reward_function(eval_states, benchmark_param)
@@ -1384,7 +1461,7 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
                 torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
                 c='red', s=1
             )
-        elif args.env_name == 'antmaze':
+        elif 'antmaze' in args.env_name:
             axs[benchmark_id, 0].scatter(eval_states[..., 0], eval_states[..., 1], c=real_eval_rewards)
             axs[benchmark_id, 1].scatter(eval_states[..., 0], eval_states[..., 1], c=eval_rewards)
             axs[benchmark_id, 2].scatter(produced_trajectory[..., 0], produced_trajectory[..., 1], c='red', s=5)
@@ -1422,8 +1499,8 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
         )
         trajectory_rewards = trajectory_states_rewards.sum(dim=-1)
         
-        if args.env_name == 'antmaze' and 'goal' in benchmark_test_label: 
-            trajectory_rewards = torch.where(trajectory_rewards != -all_produced_trajectories.shape[2], 1., 0.)
+        if 'antmaze' in args.env_name and 'goal' in benchmark_test_label: 
+            trajectory_rewards = torch.where(trajectory_rewards > 0, 1., 0.)
             
         print(benchmark_test_label, ':')
         print('\tRewards:', trajectory_rewards.tolist())
@@ -1520,11 +1597,29 @@ def main(args):
             (TestRewLoop().compute_reward, 'path_loop', None),
             (TestRewMatrixEdges().compute_reward, 'path_edges', None)
         ]
+    elif args.env_name == 'antmaze-large-navigate-v0':
+        import ogbench
+        args.state_dim = 29
+        args.action_dim = 8
+        args.num_trajectories = 1000
+        args.trajectory_len = 1000
+        env, dataset, _ = ogbench.make_env_and_datasets('antmaze-large-navigate-v0', dataset_dir='datasets/', env_only=False)
+
+        def goal_reaching_reward_ogbench(state, goal):
+            return (torch.norm(state[..., :2] - goal, p=2, dim=-1) < 0.5).long() * 2 - 1
+
+        benchmarks = [
+            (goal_reaching_reward_ogbench, 'goal_1', np.array([36, 24])),
+            (goal_reaching_reward_ogbench, 'goal_2', np.array([0, 24])),
+            (goal_reaching_reward_ogbench, 'goal_3', np.array([36, 0])),
+            (goal_reaching_reward_ogbench, 'goal_4', np.array([12, 16])),
+            (goal_reaching_reward_ogbench, 'goal_5', np.array([12, 16])),
+        ]
+        
         
 
     dataset_trajectories = torch.tensor(dataset['observations']).float()
     dataset_actions = torch.tensor(dataset['actions']).float()
-    dataset_terminals = torch.tensor(dataset['terminals']).float()
     dataset_timeouts = torch.zeros(args.num_trajectories, args.trajectory_len).bool()
     dataset_timeouts[:, -1] = True
         
@@ -1532,18 +1627,15 @@ def main(args):
         N = args.num_trajectories * args.trajectory_len
         dataset_trajectories = dataset_trajectories[:N]
         dataset_actions = dataset_actions[:N]
-        dataset_terminals = dataset_terminals[:N]
         dataset_timeouts = dataset_timeouts[:N]
 
     dataset_trajectories = dataset_trajectories.reshape(-1, args.trajectory_len, args.state_dim)
     dataset_actions = dataset_actions.reshape(-1, args.trajectory_len, args.action_dim)
-    dataset_terminals = dataset_terminals
     dataset_timeouts = dataset_timeouts.reshape(-1, args.trajectory_len)
 
     dataset = Dataset(
         trajectories=dataset_trajectories,
         actions=dataset_actions,
-        terminals=dataset_terminals,
         timeouts=dataset_timeouts
     )
     
@@ -1615,7 +1707,7 @@ def main(args):
                 axs[b].scatter(random_states[b, :, 8].cpu(), random_states[b, :, 17].cpu(), c=random_states_rewards[b].cpu(), vmin=-1, vmax=1)
             elif args.env_name == 'walker':
                 axs[b].scatter(random_states[b, :, 16].cpu(), random_states[b, :, 24].cpu(), c=random_states_rewards[b].cpu(), vmin=-1, vmax=1)
-            elif args.env_name == 'antmaze':
+            elif 'antmaze' in args.env_name:
                 axs[b].scatter(random_states[b, :, 0].cpu(), random_states[b, :, 1].cpu(), c=random_states_rewards[b].cpu(), vmin=-1, vmax=1)
 
         plt.savefig(f"{args.LOGS_FOLDER}/reward_generator_examples.png")
@@ -1718,13 +1810,12 @@ def main(args):
                 reward_generator, dataset,
                 batch_size=1, num_random_samples=(128+num_eval_states)
             )
-
+        
         encode_obs = random_states[:, :128, :].to(device)
         decode_obs = random_states[:, 128:, :].to(device)
 
-        # encode_rewards = random_states_rewards[:, :128, None].to(device)
-        # decode_rewards = random_states_rewards[:, 128:, None].to(device)
-
+        # The goal should be included in the encoding states:
+        encode_obs[0, 0, :2] = torch.tensor(benchmarks[benchmark_id][2]).float()
         
         encode_rewards = benchmarks[benchmark_id][0](encode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
         decode_rewards = benchmarks[benchmark_id][0](decode_obs.cpu(), benchmarks[benchmark_id][2]).unsqueeze(-1).to(device)
@@ -1755,7 +1846,7 @@ def main(args):
         elif args.env_name == 'walker':
             axs[benchmark_id, 0].scatter(decode_obs[..., 16].cpu(), decode_obs[..., 24].cpu(), c=rewards_pred.cpu())
             axs[benchmark_id, 1].scatter(decode_obs[..., 16].cpu(), decode_obs[..., 24].cpu(), c=decode_rewards.cpu())
-        elif args.env_name == 'antmaze':
+        elif 'antmaze' in args.env_name:
             axs[benchmark_id, 0].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=rewards_pred.cpu())
             axs[benchmark_id, 1].scatter(decode_obs[..., 0].cpu(), decode_obs[..., 1].cpu(), c=decode_rewards.cpu())
         
@@ -1765,7 +1856,7 @@ def main(args):
     ################################################################################################################
 
 
-    if args.env_name == 'antmaze':
+    if 'antmaze' in args.env_name:
         iql_agent = IQL(state_dim=args.state_dim, action_dim=args.action_dim, args=args).to(device)
     elif args.env_name == 'cheetah':
         iql_agent = IQL(state_dim=args.state_dim-1, action_dim=args.action_dim, args=args).to(device)
@@ -1990,7 +2081,7 @@ def get_args():
 
     """
     
-    python main.py --env_name walker --method fre \
+    python main-ogbench.py --env_name antmaze-large-navigate-v0 --method fre \
             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
             --encoder_training_steps 10 \
             --iql_training_steps 2 \
@@ -2002,7 +2093,7 @@ def get_args():
     """
                
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
-    parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
+    parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'antmaze-large-navigate-v0', 'cheetah', 'walker'])
     parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
     
     parser.add_argument('--reward_generator_training_steps', type=int, required=True)
@@ -2030,7 +2121,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'{args.env_name}-{args.method}'
+    exp_name = f'ogbench-{args.env_name}-{args.method}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         
