@@ -281,8 +281,8 @@ class GoalRewards:
             goals = goals.to(device)
 
             # r = torch.norm(obs - goals.unsqueeze(-2), dim=-1) < 2
-            # r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 2
-            r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 0.5
+            r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 2
+            # r = torch.norm(obs[..., :2] - goals[..., :2].unsqueeze(-2), dim=-1) < 0.5
             r = r.float() * 2 - 1
             r = torch.clip(r, -1, 1)
 
@@ -358,8 +358,12 @@ class UnsupervsiedReward:
                 goal = goal.repeat(1, 1)
                 r, param_id = self.goal_rewards(random_states[[b]], goals=goal)    
                 reward_params[b, 1:1+obs_len] = param_id
+                
                 random_states[b, 0] = goal
                 r[0, 0] = 1.
+                
+                random_states[b, num_random_samples//2] = goal
+                r[0, num_random_samples//2] = 1.
                 
             elif reward_type == 1:
                 param_id = self.linear_rewards.sample(1).unsqueeze(0)
