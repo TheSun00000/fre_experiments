@@ -23,6 +23,8 @@ import os
 from datetime import datetime
 
 
+POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg 
+
 
 # In[2]:
 
@@ -34,7 +36,7 @@ TRAJECTORY_LEN = 1000
 now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-exp_name = f'iql'
+exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-walker'
     
 LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
 
@@ -479,9 +481,8 @@ for timestep in tqdm(range(1000000)):
     # Actor Loss ############################################
 
 
-    EPOLICY_EXTRACTION_METHON = 'ddpg' # awr |  ddpg 
     
-    if EPOLICY_EXTRACTION_METHON == 'awr':
+    if POLICY_EXTRACTION_METHOD == 'awr':
         v = iql_agent.get_value(batch['states'])
         q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
         q = torch.minimum(q1, q2)
@@ -495,7 +496,7 @@ for timestep in tqdm(range(1000000)):
         actor_loss = -(exp_a * log_probs).mean()
         
         
-    elif EPOLICY_EXTRACTION_METHON == 'ddpg':
+    elif POLICY_EXTRACTION_METHOD == 'ddpg':
         dist = iql_agent.get_actor(batch['states'])
         normalized_actions = torch.tanh(dist.loc)
         q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
