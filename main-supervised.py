@@ -1857,7 +1857,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'{args.env_name}-{args.method}'
+    exp_name = f'{args.env_name}-supervised:{BENCHMARK_ID}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         

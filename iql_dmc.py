@@ -138,7 +138,7 @@ class VelocityRewardFunctionWalker:
 velocity_reward_function = VelocityRewardFunctionWalker()
 
 def reward_function(state):
-    return velocity_reward_function.compute_reward(state, 4)
+    return velocity_reward_function.compute_reward(state, 8)
 
 
 # # IQL:
@@ -227,13 +227,13 @@ class IQL(nn.Module):
         super(IQL, self).__init__()
         self.obs_len = state_dim
                 
-        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         self.target_critic = copy.deepcopy(self.critic)
         for param in self.target_critic.parameters():
             param.requires_grad = False
         
-        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[256, 256])        
-        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])        
+        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
         self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
@@ -306,7 +306,8 @@ def get_iql_training_data(batch_size):
     actions = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, ACTION_DIM)
     masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, 1)
     
-    rewards = reward_function(states).unsqueeze(-1)
+    # rewards = reward_function(states).unsqueeze(-1)
+    rewards = reward_function(next_states).unsqueeze(-1)
     
     states = states[..., :24]
     next_states = next_states[..., :24]
@@ -501,11 +502,11 @@ for timestep in tqdm(range(1000000)):
         normalized_actions = torch.tanh(dist.loc)
         q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
         q = (q1 + q2) / 2
-        q_loss = -q.mean()
+        q_loss_ = -q.mean()
         log_probs = dist.log_prob(batch['actions'])
         bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
         
-        actor_loss = ((q_loss + bc_loss)).mean()
+        actor_loss = ((q_loss_ + bc_loss)).mean()
     
     iql_agent.actor.zero_grad(set_to_none=True)
     actor_loss.backward()
