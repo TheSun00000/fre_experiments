@@ -294,15 +294,15 @@ def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
 # In[21]:
 
 
-def get_iql_training_data(batch_size, num_states):
+def get_iql_training_data(batch_size):
 
-    trajectory_idx = torch.randint(0, num_trajectories, (batch_size*num_states,))
-    state_idx = torch.randint(0, len_trajectory, (batch_size*num_states,)) % (len_trajectory - 1)
+    trajectory_idx = torch.randint(0, num_trajectories, (batch_size,))
+    state_idx = torch.randint(0, len_trajectory, (batch_size,)) % (len_trajectory - 1)
 
-    states = dataset_trajectories[trajectory_idx, state_idx].reshape(batch_size, num_states, obs_dim)
-    next_states = dataset_trajectories[trajectory_idx, state_idx+1].reshape(batch_size, num_states, obs_dim)
-    actions = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, num_states, ACTION_DIM)
-    masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, num_states, 1)
+    states = dataset_trajectories[trajectory_idx, state_idx].reshape(batch_size, obs_dim)
+    next_states = dataset_trajectories[trajectory_idx, state_idx+1].reshape(batch_size, obs_dim)
+    actions = dataset_actions[trajectory_idx, state_idx].reshape(batch_size, ACTION_DIM)
+    masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, 1)
     
     rewards = reward_function(states).unsqueeze(-1)
     
@@ -347,7 +347,8 @@ def run_test(iql_agent, num_evals):
         produced_trajectory_physics = [] 
 
 
-        for step in tqdm(range(1000)):
+        # for step in tqdm(range(1000)):
+        for step in range(1000):
             
             physics = env.physics.get_state()
             
@@ -415,21 +416,21 @@ rewards = []
 
 
 config = {
-    'expectile': 0.8,
-    'temperature': 3.0,
+    'expectile': 0.9,
+    'temperature': 10.0,
     'discount': 0.99,
     'tau': 0.005,
+    
+    'bc_coefficient': 0.01
 }
 
-iql_batch_size = 32
-iql_num_states = 512
+iql_batch_size = 1024
 
 
 for timestep in tqdm(range(1000000)):
     
     batch = get_iql_training_data(
         batch_size=iql_batch_size, 
-        num_states=iql_num_states
     )
 
         
@@ -478,12 +479,32 @@ for timestep in tqdm(range(1000000)):
     # Actor Loss ############################################
 
 
-    actions = batch['actions']
-    exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
+    EPOLICY_EXTRACTION_METHON = 'ddpg' # awr |  ddpg 
     
-    dist = iql_agent.get_actor(batch['states'])
-    log_probs = dist.log_prob(actions)
-    actor_loss = -(exp_a * log_probs).mean()
+    if EPOLICY_EXTRACTION_METHON == 'awr':
+        v = iql_agent.get_value(batch['states'])
+        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+        q = torch.minimum(q1, q2)
+        adv = q - v
+        
+        actions = batch['actions']
+        exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
+        
+        dist = iql_agent.get_actor(batch['states'])
+        log_probs = dist.log_prob(actions)
+        actor_loss = -(exp_a * log_probs).mean()
+        
+        
+    elif EPOLICY_EXTRACTION_METHON == 'ddpg':
+        dist = iql_agent.get_actor(batch['states'])
+        normalized_actions = torch.tanh(dist.loc)
+        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+        q = (q1 + q2) / 2
+        q_loss = -q.mean()
+        log_probs = dist.log_prob(batch['actions'])
+        bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+        
+        actor_loss = ((q_loss + bc_loss)).mean()
     
     iql_agent.actor.zero_grad(set_to_none=True)
     actor_loss.backward()
@@ -513,9 +534,9 @@ for timestep in tqdm(range(1000000)):
     mse_errors.append(mse_error.item())
     stds.append(std.item())
     
-    if timestep % 2000 == 0:
+    if timestep % 10000 == 0:
         
-        produced_trajectory, produced_trajectory_physics = run_test(iql_agent, num_evals=10)
+        produced_trajectory, produced_trajectory_physics = run_test(iql_agent, num_evals=20)
         r = reward_function(torch.tensor(produced_trajectory))
         r_mean = r.sum(dim=1).mean().item()
         r_std = r.sum(dim=1).std().item()
