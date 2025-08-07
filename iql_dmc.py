@@ -23,7 +23,6 @@ import os
 from datetime import datetime
 
 
-POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg 
 
 
 # In[2]:
@@ -31,12 +30,16 @@ POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg
 
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
+ENV_NAME = 'cheetah' # walker | cheetah
+POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
 
 
 now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-walker'
+exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{ENV_NAME}'
+
+print(exp_name)
     
 LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
 
@@ -46,18 +49,32 @@ os.makedirs(LOGS_FOLDER)
 # In[3]:
 
 
-STATE_DIM = 27
-ACTION_DIM = 6
-AUX_DIM = 3
-env = suite.load(
-    domain_name='walker',
-    task_name='walk',
-    environment_kwargs=dict(flat_observation=True)
-)
-dataset = np.load('datasets/walker_rnd.npy', allow_pickle=True).item()
-aux = np.load('datasets/aux_walker.npy')
-dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
+if ENV_NAME == 'walker':
+    STATE_DIM = 27
+    ACTION_DIM = 6
+    AUX_DIM = 3
+    env = suite.load(
+        domain_name='walker',
+        task_name='run',
+        environment_kwargs=dict(flat_observation=True)
+    )
+    dataset = np.load('datasets/walker_rnd.npy', allow_pickle=True).item()
+    aux = np.load('datasets/aux_walker.npy')
+    dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
 
+
+elif ENV_NAME == 'cheetah':
+    STATE_DIM = 18
+    ACTION_DIM = 6
+    AUX_DIM = 1
+    env = suite.load(
+        domain_name='cheetah',
+        task_name='run',
+        environment_kwargs=dict(flat_observation=True)
+    )
+    dataset = np.load('datasets/cheetah_rnd.npy', allow_pickle=True).item()
+    aux = np.load('datasets/aux_cheetah.npy')
+    dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 1)), axis=-1)
 
 # In[4]:
 
@@ -134,11 +151,55 @@ class VelocityRewardFunctionWalker:
         return torch.tensor(rew[..., 0])
 
 
+class VelocityRewardFunctionCheetah:
+    def __init__(self):
+        pass    
+    
+    def _sigmoids(self, x, value_at_1, sigmoid):
+        if sigmoid == 'linear':
+            scale = 1-value_at_1
+            scaled_x = x*scale
+            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
+        else:
+            raise NotImplementedError
+    
+    def tolerance(self, x, lower, upper, margin=0.0, sigmoid='linear', value_at_margin=0):
+        in_bounds = np.logical_and(lower <= x, x <= upper)
+        d = np.where(x < lower, lower - x, x - upper) / margin
+        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
+        return value
+    
+    def compute_reward(self, states, params):
+        
+        if isinstance(params, int):
+            params = torch.full((*states.shape[:-1], 1), fill_value=params)
+        
+        assert len(states.shape) == len(params.shape), states.shape # (batch_size, obs_dim) OR (batch_size, num_pairs, obs_dim)
 
-velocity_reward_function = VelocityRewardFunctionWalker()
+        horizontal_velocity = states[..., 17:18]
+        sign_of_param = np.sign(params)
+        horizontal_velocity = horizontal_velocity * sign_of_param
+        rew = self.tolerance(horizontal_velocity,
+                             lower=np.abs(params),
+                             upper=float('inf'),
+                             margin=np.abs(params),
+                             value_at_margin=0,
+                             sigmoid='linear')
+        
+        return torch.tensor(rew[..., 0], dtype=torch.float32)
+    
+  
+if ENV_NAME == 'walker':
+    velocity_reward_function = VelocityRewardFunctionWalker()
 
-def reward_function(state):
-    return velocity_reward_function.compute_reward(state, 8)
+    def reward_function(state):
+        return velocity_reward_function.compute_reward(state, 8)
+    
+elif ENV_NAME == 'cheetah':
+    velocity_reward_function = VelocityRewardFunctionCheetah()
+
+    def reward_function(state):
+        return velocity_reward_function.compute_reward(state, 10)
 
 
 # # IQL:
@@ -309,8 +370,12 @@ def get_iql_training_data(batch_size):
     # rewards = reward_function(states).unsqueeze(-1)
     rewards = reward_function(next_states).unsqueeze(-1)
     
-    states = states[..., :24]
-    next_states = next_states[..., :24]
+    if ENV_NAME == 'walker':
+        states = states[..., :24]
+        next_states = next_states[..., :24]
+    elif ENV_NAME == 'cheetah':
+        states = states[..., :17]
+        next_states = next_states[..., :17]
     
     return {
         'states': states.to(device),
@@ -357,7 +422,6 @@ def run_test(iql_agent, num_evals):
             
             produced_trajectory_physics.append(physics)
             
-            ENV_NAME = 'walker'
             if ENV_NAME == 'walker':
                 horizontal_velocity = env.physics.horizontal_velocity()
                 torso_upright = env.physics.torso_upright()
