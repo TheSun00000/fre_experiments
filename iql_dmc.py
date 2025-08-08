@@ -30,8 +30,10 @@ from datetime import datetime
 
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
-ENV_NAME = 'cheetah' # walker | cheetah
-POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
+ENV_NAME = 'walker' # walker | cheetah
+POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg 
+VALUE_STEPS = 1000000
+POLICY_STEPS = 1000000
 
 
 now = datetime.now()
@@ -299,7 +301,7 @@ class IQL(nn.Module):
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
         self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=0.003)
-        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, 1000000)
+        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, POLICY_STEPS)
         
         
     def get_value(self, obs):
@@ -494,7 +496,7 @@ config = {
 iql_batch_size = 1024
 
 
-for timestep in tqdm(range(1000000)):
+for timestep in tqdm(range(VALUE_STEPS+POLICY_STEPS)):
     
     batch = get_iql_training_data(
         batch_size=iql_batch_size, 
@@ -509,84 +511,92 @@ for timestep in tqdm(range(1000000)):
         next_v = iql_agent.get_value(batch['next_states']).detach()
     
     
-    # Value Loss: Update V towards expectile of min(q1, q2).
+    if timestep < VALUE_STEPS:
     
-    v = iql_agent.get_value(batch['states'])
-    adv = target_q - v
-    v_loss = expectile_loss(adv, adv, config['expectile'])
-    v_loss = v_loss.mean()
+        # Value Loss: Update V towards expectile of min(q1, q2).
+        
+        v = iql_agent.get_value(batch['states'])
+        adv = target_q - v
+        v_loss = expectile_loss(adv, adv, config['expectile'])
+        v_loss = v_loss.mean()
 
-    iql_agent.value.zero_grad(set_to_none=True)
-    v_loss.backward()
-    iql_agent.value_optim.step()
+        iql_agent.value.zero_grad(set_to_none=True)
+        v_loss.backward()
+        iql_agent.value_optim.step()
 
-    # Critic Loss. Update Q = r #############################
-    targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
+        # Critic Loss. Update Q = r #############################
+        targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
 
-    q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-    q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
-    q_loss = q_loss
-    
-    iql_agent.critic.zero_grad(set_to_none=True)
-    q_loss.backward()
-    iql_agent.critic_optim.step()
+        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+        q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
+        q_loss = q_loss
+        
+        iql_agent.critic.zero_grad(set_to_none=True)
+        q_loss.backward()
+        iql_agent.critic_optim.step()
 
-    # if timestep % 10 == 0:
-    update_target_critic(iql_agent.critic, iql_agent.target_critic, config['tau'])
+        # if timestep % 10 == 0:
+        update_target_critic(iql_agent.critic, iql_agent.target_critic, config['tau'])
 
-    value_loss = v_loss + q_loss
-    value_info = {
-        'v_loss': v_loss,
-        'q_loss': q_loss,
-        'v': v.mean(),
-        'q': torch.minimum(q1, q2).mean(),
-    }
+        value_loss = v_loss + q_loss
+        value_info = {
+            'v_loss': v_loss,
+            'q_loss': q_loss,
+            'v': v.mean(),
+            'q': torch.minimum(q1, q2).mean(),
+        }
+        
+        v_losses.append(v_loss.item())
+        q_losses.append(q_loss.item())
 
 
     # Actor Loss ############################################
 
-
-    
-    if POLICY_EXTRACTION_METHOD == 'awr':
-        v = iql_agent.get_value(batch['states'])
-        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-        q = torch.minimum(q1, q2)
-        adv = q - v
+    else:    
+        if POLICY_EXTRACTION_METHOD == 'awr':
+            v = iql_agent.get_value(batch['states'])
+            q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+            q = torch.minimum(q1, q2)
+            adv = q - v
+            
+            actions = batch['actions']
+            exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
+            
+            dist = iql_agent.get_actor(batch['states'])
+            log_probs = dist.log_prob(actions)
+            actor_loss = -(exp_a * log_probs).mean()
+            
+            
+        elif POLICY_EXTRACTION_METHOD == 'ddpg':
+            dist = iql_agent.get_actor(batch['states'])
+            normalized_actions = torch.tanh(dist.loc)
+            q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+            q = (q1 + q2) / 2
+            q_loss_ = -q.mean()
+            log_probs = dist.log_prob(batch['actions'])
+            bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+            
+            actor_loss = ((q_loss_ + bc_loss)).mean()
         
-        actions = batch['actions']
-        exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
-        
-        dist = iql_agent.get_actor(batch['states'])
-        log_probs = dist.log_prob(actions)
-        actor_loss = -(exp_a * log_probs).mean()
+        iql_agent.actor.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        iql_agent.actor_optim.step()
+        iql_agent.actor_lr_schedule.step()
         
         
-    elif POLICY_EXTRACTION_METHOD == 'ddpg':
-        dist = iql_agent.get_actor(batch['states'])
-        normalized_actions = torch.tanh(dist.loc)
-        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-        q = (q1 + q2) / 2
-        q_loss_ = -q.mean()
-        log_probs = dist.log_prob(batch['actions'])
-        bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+        std = dist.stddev.mean()
+        mse_error = ((dist.loc - batch['actions'])**2).mean()
         
-        actor_loss = ((q_loss_ + bc_loss)).mean()
-    
-    iql_agent.actor.zero_grad(set_to_none=True)
-    actor_loss.backward()
-    iql_agent.actor_optim.step()
-    iql_agent.actor_lr_schedule.step()
-    
-    
-    std = dist.stddev.mean()
-    mse_error = ((dist.loc - batch['actions'])**2).mean()
-    
-    actor_info = {
-        'actor_loss': actor_loss,
-        'std': std,
-        'adv': adv.mean(),
-        'mse_error': mse_error,
-    }
+        actor_info = {
+            'actor_loss': actor_loss,
+            'std': std,
+            'adv': adv.mean(),
+            'mse_error': mse_error,
+        }
+        
+        actor_losses.append(actor_loss.item())
+        mse_errors.append(mse_error.item())
+        stds.append(std.item())
 
     ########################################################################################
     
@@ -594,13 +604,11 @@ for timestep in tqdm(range(1000000)):
     
     
     
-    actor_losses.append(actor_loss.item())
-    v_losses.append(v_loss.item())
-    q_losses.append(q_loss.item())
-    mse_errors.append(mse_error.item())
-    stds.append(std.item())
     
-    if timestep % 10000 == 0:
+    
+    
+    
+    if timestep > VALUE_STEPS and timestep % 10000 == 0:
         
         produced_trajectory, produced_trajectory_physics = run_test(iql_agent, num_evals=20)
         r = reward_function(torch.tensor(produced_trajectory))
@@ -612,19 +620,19 @@ for timestep in tqdm(range(1000000)):
         fig, axs = plt.subplots(1, 6, figsize=(35, 5))
         
         axs[0].plot(smooth_and_downsample(actor_losses))
-        axs[1].set_ylim(0,max(actor_losses[-100:]))
+        # axs[1].set_ylim(0,max(actor_losses[-100:]))
         axs[0].set_title("Actor Loss")
         
         axs[1].plot(smooth_and_downsample(v_losses))
-        axs[1].set_ylim(0,max(v_losses[-100:]))
+        # axs[1].set_ylim(0,max(v_losses[-100:]))
         axs[1].set_title("V Loss")
         
         axs[2].plot(smooth_and_downsample(q_losses))
-        axs[2].set_ylim(0,max(q_losses[-100:]))
+        # axs[2].set_ylim(0,max(q_losses[-100:]))
         axs[2].set_title("Q Loss")
         
         axs[3].plot(smooth_and_downsample(mse_errors))
-        axs[3].set_ylim(0,max(mse_errors[-100:]))
+        # axs[3].set_ylim(0,max(mse_errors[-100:]))
         axs[3].set_title("MSE Errors")
         
         axs[4].plot(smooth_and_downsample(stds))
