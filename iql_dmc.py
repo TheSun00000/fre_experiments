@@ -31,9 +31,10 @@ from datetime import datetime
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
 ENV_NAME = 'walker' # walker | cheetah
-POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg 
-VALUE_STEPS = 1000000
-POLICY_STEPS = 1000000
+POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
+TRAINING_STEPS = 1000000
+BATCH_SIZE = 1024
+
 
 
 now = datetime.now()
@@ -204,6 +205,8 @@ elif ENV_NAME == 'cheetah':
         return velocity_reward_function.compute_reward(state, 10)
 
 
+dataset_rewards = reward_function(dataset_trajectories)
+
 # # IQL:
 
 # In[14]:
@@ -223,7 +226,7 @@ class MLP(nn.Module):
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.Mish())
-            # layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim))
             prev_dim = hidden_dim  # Update input size for next layer
         
         # Final output layer
@@ -291,38 +294,38 @@ class IQL(nn.Module):
         self.obs_len = state_dim
                 
         self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
-        self.target_critic = copy.deepcopy(self.critic)
-        for param in self.target_critic.parameters():
-            param.requires_grad = False
+        # self.target_critic = copy.deepcopy(self.critic)
+        # for param in self.target_critic.parameters():
+        #     param.requires_grad = False
         
-        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])        
+        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])     
+        self.target_value = copy.deepcopy(self.value)
+        for param in self.target_value.parameters():
+            param.requires_grad = False   
+            
         self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         
-        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
-        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
-        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=0.003)
-        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, POLICY_STEPS)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.value_optim = torch.optim.Adam(self.value.parameters(),   lr=3e-4)
+        self.actor_optim = torch.optim.Adam(self.actor.parameters(),   lr=3e-4)
+        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, TRAINING_STEPS)
         
         
     def get_value(self, obs):
-        w_and_obs = torch.concatenate([obs], dim=-1)
-        return self.value(w_and_obs)
+        return self.value(obs)
 
+    def get_target_value(self, obs):
+        return self.target_value(obs)
+    
     def get_critic(self, obs, actions):
-        w_and_obs = torch.concatenate([obs], dim=-1)
-        return self.critic(w_and_obs, actions)
+        return self.critic(obs, actions)
     
-    def get_target_critic(self, obs, actions):
-        w_and_obs = torch.concatenate([obs], dim=-1)
-        return self.target_critic(w_and_obs, actions)
-
     def get_actor(self, obs, temperature=1.0):
-        w_and_obs = torch.concatenate([obs], dim=-1)
-        return self.actor(w_and_obs, temperature)
+        return self.actor(obs, temperature)
     
     
     
-# def update_target_critic(critic, target_critic, tau):
+# def update_target_value(critic, target_critic, tau):
 
 #     critic_state_dict = critic.state_dict()
 #     target_critic_state_dict = target_critic.state_dict()
@@ -333,18 +336,18 @@ class IQL(nn.Module):
 #     target_critic.load_state_dict(target_critic_state_dict)
     
     
-def update_target_critic(source, target, alpha):
+def update_target_value(source, target, alpha):
     for target_param, source_param in zip(target.parameters(), source.parameters()):
         target_param.data.mul_(1. - alpha).add_(source_param.data, alpha=alpha)
     
     
-def expectile_loss(adv, diff, expectile=0.7):
+def expectile_loss(u, expectile=0.7):
     weight = torch.where(
-        adv >= 0, 
-        torch.tensor(expectile, dtype=adv.dtype), 
-        torch.tensor(1 - expectile, dtype=adv.dtype)
+        u >= 0, 
+        torch.tensor(expectile, dtype=u.dtype), 
+        torch.tensor(1 - expectile, dtype=u.dtype)
     )
-    return weight * (diff ** 2)
+    return weight * (u ** 2)
 
 
 def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
@@ -370,7 +373,8 @@ def get_iql_training_data(batch_size):
     masks = ~dataset_timeouts[trajectory_idx, state_idx+1].reshape(batch_size, 1)
     
     # rewards = reward_function(states).unsqueeze(-1)
-    rewards = reward_function(next_states).unsqueeze(-1)
+    # rewards = reward_function(next_states).unsqueeze(-1)
+    rewards = dataset_rewards[trajectory_idx, state_idx+1].reshape(batch_size, 1)
     
     if ENV_NAME == 'walker':
         states = states[..., :24]
@@ -493,110 +497,105 @@ config = {
     'bc_coefficient': 0.01
 }
 
-iql_batch_size = 1024
 
 
-for timestep in tqdm(range(VALUE_STEPS+POLICY_STEPS)):
+for timestep in tqdm(range(TRAINING_STEPS)):
     
     batch = get_iql_training_data(
-        batch_size=iql_batch_size, 
+        batch_size=BATCH_SIZE, 
     )
 
+
         
-    with torch.no_grad():
-        
-        target_q1, target_q2 = iql_agent.get_target_critic(batch['states'], batch['actions'])
-        target_q1, target_q2 = target_q1.detach(), target_q2.detach()
-        target_q = torch.minimum(target_q1, target_q2)
-        next_v = iql_agent.get_value(batch['next_states']).detach()
+    # Value Loss: Update V towards expectile of min(q1, q2).
     
+    v = iql_agent.get_value(batch['states'])
     
-    if timestep < VALUE_STEPS:
+    q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+    q = torch.minimum(q1, q2).detach()
     
-        # Value Loss: Update V towards expectile of min(q1, q2).
-        
-        v = iql_agent.get_value(batch['states'])
-        adv = target_q - v
-        v_loss = expectile_loss(adv, adv, config['expectile'])
-        v_loss = v_loss.mean()
+    adv = q - v
+    v_loss = expectile_loss(adv, config['expectile'])
+    v_loss = v_loss.mean()
 
-        iql_agent.value.zero_grad(set_to_none=True)
-        v_loss.backward()
-        iql_agent.value_optim.step()
+    iql_agent.value.zero_grad(set_to_none=True)
+    v_loss.backward()
+    iql_agent.value_optim.step()
 
-        # Critic Loss. Update Q = r #############################
-        targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
+    # Critic Loss. Update Q = r #############################
+    next_v = iql_agent.get_target_value(batch['states']).detach()
+    targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
 
-        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-        q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
-        q_loss = q_loss
-        
-        iql_agent.critic.zero_grad(set_to_none=True)
-        q_loss.backward()
-        iql_agent.critic_optim.step()
+    q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+    q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
+    q_loss = q_loss
+    
+    iql_agent.critic.zero_grad(set_to_none=True)
+    q_loss.backward()
+    iql_agent.critic_optim.step()
 
-        # if timestep % 10 == 0:
-        update_target_critic(iql_agent.critic, iql_agent.target_critic, config['tau'])
+    # if timestep % 10 == 0:
+    update_target_value(iql_agent.value, iql_agent.target_value, config['tau'])
 
-        value_loss = v_loss + q_loss
-        value_info = {
-            'v_loss': v_loss,
-            'q_loss': q_loss,
-            'v': v.mean(),
-            'q': torch.minimum(q1, q2).mean(),
-        }
-        
-        v_losses.append(v_loss.item())
-        q_losses.append(q_loss.item())
+    value_loss = v_loss + q_loss
+    value_info = {
+        'v_loss': v_loss,
+        'q_loss': q_loss,
+        'v': v.mean(),
+        'q': torch.minimum(q1, q2).mean(),
+    }
+    
+    v_losses.append(v_loss.item())
+    q_losses.append(q_loss.item())
 
 
     # Actor Loss ############################################
 
-    else:    
-        if POLICY_EXTRACTION_METHOD == 'awr':
-            v = iql_agent.get_value(batch['states'])
-            q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-            q = torch.minimum(q1, q2)
-            adv = q - v
-            
-            actions = batch['actions']
-            exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
-            
-            dist = iql_agent.get_actor(batch['states'])
-            log_probs = dist.log_prob(actions)
-            actor_loss = -(exp_a * log_probs).mean()
-            
-            
-        elif POLICY_EXTRACTION_METHOD == 'ddpg':
-            dist = iql_agent.get_actor(batch['states'])
-            normalized_actions = torch.tanh(dist.loc)
-            q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
-            q = (q1 + q2) / 2
-            q_loss_ = -q.mean()
-            log_probs = dist.log_prob(batch['actions'])
-            bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
-            
-            actor_loss = ((q_loss_ + bc_loss)).mean()
+    # else:    
+    if POLICY_EXTRACTION_METHOD == 'awr':
+        v = iql_agent.get_value(batch['states'])
+        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+        q = torch.minimum(q1, q2)
+        adv = q - v
         
-        iql_agent.actor.zero_grad(set_to_none=True)
-        actor_loss.backward()
-        iql_agent.actor_optim.step()
-        iql_agent.actor_lr_schedule.step()
+        actions = batch['actions']
+        exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
+        
+        dist = iql_agent.get_actor(batch['states'])
+        log_probs = dist.log_prob(actions)
+        actor_loss = -(exp_a * log_probs).mean()
         
         
-        std = dist.stddev.mean()
-        mse_error = ((dist.loc - batch['actions'])**2).mean()
+    elif POLICY_EXTRACTION_METHOD == 'ddpg':
+        dist = iql_agent.get_actor(batch['states'])
+        normalized_actions = torch.tanh(dist.loc)
+        q1, q2 = iql_agent.get_critic(batch['states'], batch['actions'])
+        q = (q1 + q2) / 2
+        q_loss_ = -q.mean()
+        log_probs = dist.log_prob(batch['actions'])
+        bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
         
-        actor_info = {
-            'actor_loss': actor_loss,
-            'std': std,
-            'adv': adv.mean(),
-            'mse_error': mse_error,
-        }
-        
-        actor_losses.append(actor_loss.item())
-        mse_errors.append(mse_error.item())
-        stds.append(std.item())
+        actor_loss = ((q_loss_ + bc_loss)).mean()
+    
+    iql_agent.actor.zero_grad(set_to_none=True)
+    actor_loss.backward()
+    iql_agent.actor_optim.step()
+    iql_agent.actor_lr_schedule.step()
+    
+    
+    std = dist.stddev.mean()
+    mse_error = ((dist.loc - batch['actions'])**2).mean()
+    
+    actor_info = {
+        'actor_loss': actor_loss,
+        'std': std,
+        'adv': adv.mean(),
+        'mse_error': mse_error,
+    }
+    
+    actor_losses.append(actor_loss.item())
+    mse_errors.append(mse_error.item())
+    stds.append(std.item())
 
     ########################################################################################
     
@@ -608,7 +607,7 @@ for timestep in tqdm(range(VALUE_STEPS+POLICY_STEPS)):
     
     
     
-    if timestep > VALUE_STEPS and timestep % 10000 == 0:
+    if  timestep % 10000 == 0:
         
         produced_trajectory, produced_trajectory_physics = run_test(iql_agent, num_evals=20)
         r = reward_function(torch.tensor(produced_trajectory))
