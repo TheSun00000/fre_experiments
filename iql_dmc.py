@@ -270,7 +270,8 @@ class Actor(nn.Module):
         self.model = MLP(input_dim, hidden_dims, output_dim=action_dim)  # MLP only predicts mean
         
         # Learnable log standard deviation (initialized to `init_std`)
-        self.log_std = nn.Parameter(torch.ones(action_dim) * init_std)
+        # self.log_std = nn.Parameter(torch.ones(action_dim) * init_std)
+        self.log_std = torch.ones(action_dim, device=device) * init_std
 
     def forward(self, x, temperature=1.0):
         mean = self.model(x)  # Predict action mean
