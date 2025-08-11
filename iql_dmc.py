@@ -32,15 +32,31 @@ NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
 ENV_NAME = 'walker' # walker | cheetah
 POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
-TRAINING_STEPS = 1000000
+TRAINING_STEPS = 1_000_000
 BATCH_SIZE = 1024
+
+config = {
+    'expectile': 0.9,
+    'temperature': 10.0,
+    'discount': 0.99,
+    'tau': 0.005,
+    
+    'bc_coefficient': 0.01
+}
+
+print(config)
 
 
 
 now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{ENV_NAME}'
+if POLICY_EXTRACTION_METHOD == 'awr':
+    exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{config["temperature"]}-{ENV_NAME}'
+elif POLICY_EXTRACTION_METHOD == 'ddpg':
+    exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{config["bc_coefficient"]}-{ENV_NAME}'
+
+exp_name += '-fixed_std'
 
 print(exp_name)
     
@@ -309,7 +325,7 @@ class IQL(nn.Module):
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
         self.value_optim = torch.optim.Adam(self.value.parameters(),   lr=3e-4)
         self.actor_optim = torch.optim.Adam(self.actor.parameters(),   lr=3e-4)
-        self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, TRAINING_STEPS)
+        # self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, TRAINING_STEPS)
         
         
     def get_value(self, obs):
@@ -489,14 +505,6 @@ rewards = []
 # In[48]:
 
 
-config = {
-    'expectile': 0.9,
-    'temperature': 10.0,
-    'discount': 0.99,
-    'tau': 0.005,
-    
-    'bc_coefficient': 0.01
-}
 
 
 
@@ -581,7 +589,7 @@ for timestep in tqdm(range(TRAINING_STEPS)):
     iql_agent.actor.zero_grad(set_to_none=True)
     actor_loss.backward()
     iql_agent.actor_optim.step()
-    iql_agent.actor_lr_schedule.step()
+    # iql_agent.actor_lr_schedule.step()
     
     
     std = dist.stddev.mean()

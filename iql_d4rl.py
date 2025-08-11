@@ -265,7 +265,7 @@ def get_iql_training_data(batch_size):
     
     # rewards = reward_function(states).unsqueeze(-1)
     # rewards = reward_function(next_states).unsqueeze(-1)
-    rewards = dataset_rewards[trajectory_idx, state_idx+1].reshape(batch_size, 1)
+    rewards = dataset_rewards[trajectory_idx, state_idx].reshape(batch_size, 1)
     
     ENV_NAME = 'walker'
     if ENV_NAME == 'walker':
