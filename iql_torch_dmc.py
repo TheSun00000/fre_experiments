@@ -32,17 +32,18 @@ TRAJECTORY_LEN = 1000
 
 
 ENV_NAME = 'cheetah' # walker | cheetah
-POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
+POLICY_EXTRACTION_METHOD = 'ddpg' # awr |  ddpg 
 TRAINING_STEPS = 1_000_000
 BATCH_SIZE = 1024
 
 config = {
     'expectile': 0.9,
-    'temperature': 10.0,
     'discount': 0.99,
     'tau': 0.005,
     
-    'bc_coefficient': 0.01
+    'temperature': 10.0, # awr
+    
+    'bc_coefficient': 0.01 # ddpg
 }
 
 print(config)
@@ -53,7 +54,10 @@ print(config)
 now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-exp_name = f'iql-torch-{ENV_NAME}'
+if POLICY_EXTRACTION_METHOD == 'awr':
+    exp_name = f'iql-torch-{POLICY_EXTRACTION_METHOD}-{config["temperature"]}-{ENV_NAME}'
+elif POLICY_EXTRACTION_METHOD == 'ddpg':
+    exp_name = f'iql-torch-{POLICY_EXTRACTION_METHOD}-{config["bc_coefficient"]}-{ENV_NAME}'
 
 print(exp_name)
     
@@ -287,7 +291,10 @@ LOG_STD_MAX = 2.0
 class GaussianPolicy(nn.Module):
     def __init__(self, obs_dim, act_dim, hidden_dim=256, n_hidden=2):
         super().__init__()
-        self.net = mlp([obs_dim, *([hidden_dim] * n_hidden), act_dim])
+        if POLICY_EXTRACTION_METHOD == 'awr':
+            self.net = mlp([obs_dim, *([hidden_dim] * n_hidden), act_dim])
+        elif POLICY_EXTRACTION_METHOD == 'ddpg':
+            self.net = mlp([obs_dim, *([hidden_dim] * n_hidden), act_dim], output_activation=nn.Tanh)
         self.log_std = nn.Parameter(torch.zeros(act_dim, dtype=torch.float32))
 
     def forward(self, obs):
@@ -345,16 +352,6 @@ class IQL(nn.Module):
         self.q_optimizer = optimizer_factory(self.critic.parameters())
         self.policy_optimizer = optimizer_factory(self.policy.parameters())
         self.policy_lr_schedule = CosineAnnealingLR(self.policy_optimizer, max_steps)
-
-
-
-
-config = {
-    'expectile': 0.8,
-    'temperature': 3.0,
-    'discount': 0.99,
-    'tau': 0.005,
-}
 
 
 
@@ -468,9 +465,9 @@ def run_test(iql_agent, num_evals):
 
 
 
-policy = GaussianPolicy(obs_dim, act_dim).to(device)
-critic = TwinQ(obs_dim, act_dim)
-value = ValueFunction(obs_dim)
+policy = GaussianPolicy(obs_dim, act_dim, hidden_dim=512, n_hidden=3).to(device)
+critic = TwinQ(obs_dim, act_dim, hidden_dim=512, n_hidden=3)
+value = ValueFunction(obs_dim, hidden_dim=512, n_hidden=3)
 
 iql_agent = IQL(
     critic=critic,
@@ -521,16 +518,30 @@ for timestep in tqdm(range(10**6)):
     update_exponential_moving_average(iql_agent.target_critic, iql_agent.critic, config['tau'])
 
     # Update policy
-    exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)
-    policy_out = iql_agent.policy(observations)
-    if isinstance(policy_out, torch.distributions.Distribution):
-        bc_losses = -policy_out.log_prob(actions)
-    elif torch.is_tensor(policy_out):
-        assert policy_out.shape == actions.shape
-        bc_losses = torch.sum((policy_out - actions)**2, dim=1)
-    else:
-        raise NotImplementedError
-    policy_loss = torch.mean(exp_adv * bc_losses)
+    if POLICY_EXTRACTION_METHOD == 'awr':
+        exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)
+        policy_out = iql_agent.policy(observations)
+        if isinstance(policy_out, torch.distributions.Distribution):
+            bc_losses = -policy_out.log_prob(actions)
+        elif torch.is_tensor(policy_out):
+            assert policy_out.shape == actions.shape
+            bc_losses = torch.sum((policy_out - actions)**2, dim=1)
+        else:
+            raise NotImplementedError
+        policy_loss = torch.mean(exp_adv * bc_losses)
+        
+    elif POLICY_EXTRACTION_METHOD == 'ddpg':
+        policy_out = iql_agent.policy(observations)
+        qs = iql_agent.critic.both(observations, policy_out.mean)
+        q = sum(qs) / len(qs)
+        q_loss_ = -q.mean()
+        log_probs = policy_out.log_prob(actions)
+        bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+        
+        policy_loss = torch.mean(q_loss_ + bc_loss)
+    
+    
+    
     iql_agent.policy_optimizer.zero_grad(set_to_none=True)
     policy_loss.backward()
     iql_agent.policy_optimizer.step()
