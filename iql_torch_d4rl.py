@@ -20,7 +20,8 @@ from datetime import datetime
 
 
 
-ENV_NAME = 'halfcheetah-medium-v2'
+# ENV_NAME = 'halfcheetah-medium-expert-v2'
+ENV_NAME = 'walker2d-medium-expert-v2'
 
 
 
@@ -87,7 +88,6 @@ def get_env_and_dataset(env_name, max_episode_steps=1000):
 # [3]:
 
 
-ENV_NAME = 'halfcheetah-medium-expert-v2'
 env, dataset = get_env_and_dataset(ENV_NAME)
 
 
@@ -332,11 +332,11 @@ for timestep in tqdm(range(10**6)):
     
     
     
-    if timestep % 1000 == 0:
+    if timestep % 5000 == 0:
         
         eval_returns = np.array([evaluate_policy(env, iql_agent) for _ in range(10)])
         normalized_returns = d4rl.get_normalized_score(ENV_NAME, eval_returns) * 100.0
-        
+        print(normalized_returns.mean())
         rewards_logs.append(normalized_returns.mean())
         
         clear_output(True)
@@ -354,7 +354,7 @@ for timestep in tqdm(range(10**6)):
         axs[2].set_ylim(0,max(q_losses[-100:]))
         axs[2].set_title("Q Loss")
         
-        axs[3].plot(smooth_and_downsample(rewards_logs))
+        axs[3].plot(rewards_logs)
         axs[3].set_title("rewards")
         
         plt.savefig(f"{LOGS_FOLDER}/iql_training.png")

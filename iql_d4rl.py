@@ -28,7 +28,7 @@ from datetime import datetime
 
 
 
-ENV_NAME = 'halfcheetah-medium-v2'
+ENV_NAME = 'halfcheetah-medium-expert-v2'
 
 
 
