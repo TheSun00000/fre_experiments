@@ -568,6 +568,7 @@ for timestep in tqdm(range(10**6)):
         # r_mean = r.sum(dim=1).mean().item()
         
         r_mean = eval_rewards.mean()
+        print(r_mean)
         
         rewards_logs.append(r_mean)
         
@@ -586,7 +587,7 @@ for timestep in tqdm(range(10**6)):
         axs[2].set_ylim(0,max(q_losses[-100:]))
         axs[2].set_title("Q Loss")
         
-        axs[3].plot(smooth_and_downsample(rewards_logs))
+        axs[3].plot(rewards_logs)
         axs[3].set_title("rewards")
         
         plt.savefig(f"{LOGS_FOLDER}/iql_training.png")
