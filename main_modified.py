@@ -1792,10 +1792,11 @@ def main(args):
 
 
     config = {
-        'expectile': 0.8,
+        'expectile': 0.9,
         'temperature': 3.0,
         'discount': 0.99,
         'tau': 0.005,
+        'bc_coefficient': 0.01
     }
 
     iql_batch_size = 64
@@ -1891,12 +1892,20 @@ def main(args):
 
         # Actor Loss ############################################
 
-
-        exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)        
-        policy_out = iql_agent.get_actor(w_target, observations)
-        bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
-        policy_loss = torch.mean(exp_adv * bc_losses)
-
+        if args.policy_extraction_method == 'awr':
+            exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)        
+            policy_out = iql_agent.get_actor(w_target, observations)
+            bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
+            policy_loss = torch.mean(exp_adv * bc_losses)
+        
+        elif args.policy_extraction_method == 'ddpg':
+            policy_out = iql_agent.get_actor(w_target, observations)
+            q1, q2 = iql_agent.get_critic(w_target, observations, policy_out.mean)
+            q = (q1 + q2) / 2
+            q_loss_ = -q.mean()
+            log_probs = policy_out.log_prob(actions)
+            bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+            policy_loss = torch.mean(q_loss_ + bc_loss)
         
         # diff = ((dist.loc - batch['actions'])**2).sum(-1, keepdim=True)
         # actor_loss = (exp_a * diff).mean()
@@ -1991,7 +2000,7 @@ def get_args():
 
     """
     
-    python main_modified.py --env_name walker --method fre \
+    python main_modified.py --env_name walker --method fre --policy_extraction_method ddpg\
             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
             --encoder_training_steps 10 \
             --iql_training_steps 2 \
@@ -2005,6 +2014,7 @@ def get_args():
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
     parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
+    parser.add_argument('--policy_extraction_method', type=str, choices=['awr', 'ddpg'], required=True)
     
     parser.add_argument('--reward_generator_training_steps', type=int, required=True)
     parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
