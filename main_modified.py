@@ -1031,13 +1031,13 @@ class IQL(nn.Module):
         super(IQL, self).__init__()
         self.obs_len = state_dim
                 
-        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         self.target_critic = copy.deepcopy(self.critic)
         for param in self.target_critic.parameters():
             param.requires_grad = False
         
-        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[256, 256])        
-        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])        
+        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         
         self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
         self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
@@ -1928,7 +1928,7 @@ def main(args):
         
         if timestep % 5000 == 0:
             clear_output(True)
-            fig, axs = plt.subplots(1, 5, figsize=(30, 5))
+            fig, axs = plt.subplots(1, 3, figsize=(18, 5))
             axs[0].plot(smooth_and_downsample(actor_losses))
             axs[0].set_ylim(0,max(actor_losses[-100:]))
             axs[0].set_title("Actor Loss")
@@ -1940,13 +1940,6 @@ def main(args):
             axs[2].plot(smooth_and_downsample(q_losses))
             axs[2].set_ylim(0,max(q_losses[-100:]))
             axs[2].set_title("Q Loss")
-            
-            axs[3].plot(smooth_and_downsample(mse_errors))
-            axs[3].set_ylim(0,max(mse_errors[-100:]))
-            axs[3].set_title("MSE Errors")
-            
-            axs[4].plot(smooth_and_downsample(stds))
-            axs[4].set_title("std")
 
             plt.savefig(f"{args.LOGS_FOLDER}/iql_training_losses.png")
             plt.close()
