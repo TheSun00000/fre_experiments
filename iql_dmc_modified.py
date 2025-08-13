@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
 
 
 import torch
@@ -26,12 +25,11 @@ from datetime import datetime
 
 
 
-# In[2]:
 
 
 NUM_TRAJECTORIES = 10000
 TRAJECTORY_LEN = 1000
-ENV_NAME = 'walker' # walker | cheetah
+ENV_NAME = 'cheetah' # walker | cheetah
 POLICY_EXTRACTION_METHOD = 'awr' # awr |  ddpg 
 TRAINING_STEPS = 1_000_000
 BATCH_SIZE = 1024
@@ -53,11 +51,10 @@ now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
 if POLICY_EXTRACTION_METHOD == 'awr':
-    exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{config["temperature"]}-{ENV_NAME}'
+    exp_name = f'iql-fixed-{POLICY_EXTRACTION_METHOD}-{config["temperature"]}-{ENV_NAME}'
 elif POLICY_EXTRACTION_METHOD == 'ddpg':
-    exp_name = f'iql-{POLICY_EXTRACTION_METHOD}-{config["bc_coefficient"]}-{ENV_NAME}'
+    exp_name = f'iql-fixed-{POLICY_EXTRACTION_METHOD}-{config["bc_coefficient"]}-{ENV_NAME}'
 
-exp_name += '-fixed_std'
 
 print(exp_name)
     
@@ -66,7 +63,6 @@ LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
 os.makedirs(LOGS_FOLDER)
 
 
-# In[3]:
 
 
 if ENV_NAME == 'walker':
@@ -96,7 +92,6 @@ elif ENV_NAME == 'cheetah':
     aux = np.load('datasets/aux_cheetah.npy')
     dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 1)), axis=-1)
 
-# In[4]:
 
 
 dataset_trajectories = torch.tensor(dataset['observations']).float()
@@ -121,7 +116,6 @@ dataset_timeouts = dataset_timeouts.reshape(-1, TRAJECTORY_LEN)
 num_trajectories, len_trajectory, obs_dim = dataset_trajectories.shape
 
 
-# In[5]:
 
 
 class VelocityRewardFunctionWalker:
@@ -222,11 +216,10 @@ elif ENV_NAME == 'cheetah':
         return velocity_reward_function.compute_reward(state, 10)
 
 
-dataset_rewards = reward_function(dataset_trajectories)
+dataset_rewards = reward_function(dataset_trajectories).float()
 
 # # IQL:
 
-# In[14]:
 
 
 import torch
@@ -376,7 +369,6 @@ def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
     return smoothed[::downsample]
 
 
-# In[21]:
 
 
 def get_iql_training_data(batch_size):
@@ -411,7 +403,6 @@ def get_iql_training_data(batch_size):
 
 
 
-# In[22]:
 
 
 
@@ -498,7 +489,6 @@ def run_test(iql_agent, num_evals):
 
 
 
-# In[44]:
 
 
 iql_agent = IQL(state_dim=STATE_DIM - AUX_DIM, action_dim=ACTION_DIM, w_dim=0).to(device)
@@ -510,7 +500,6 @@ q_losses = []
 rewards_logs = []
 
 
-# In[48]:
 
 
 
@@ -562,7 +551,7 @@ for timestep in tqdm(range(TRAINING_STEPS)):
     if POLICY_EXTRACTION_METHOD == 'awr':
         exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)
         policy_out = iql_agent.get_actor(observations)
-        bc_losses = -policy_out.log_prob(actions)
+        bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
         policy_loss = torch.mean(exp_adv * bc_losses)
         
         
@@ -639,5 +628,4 @@ for timestep in tqdm(range(TRAINING_STEPS)):
     # break
 
 
-# In[26]:
 
