@@ -554,9 +554,9 @@ class RewardGeneratorTransformer(nn.Module):
 
     def get_transformer_encoding(self, states, rewards, pad_mask):  
                 
-        if states.shape[-1] == 17: # cheetah
+        if states.shape[-1] == 18: # cheetah
             states[..., -1:] = 0
-        elif states.shape[-1] == 24: # walker
+        elif states.shape[-1] == 27: # walker
             states[..., -3:] = 0
         
         mask = (states != 0).float()
@@ -596,9 +596,9 @@ class RewardGeneratorTransformer(nn.Module):
     
     def get_reward_pred(self, w, states): # Reward Pairs: [batch, reward_pairs, obs_dim + 1]
                         
-        if states.shape[-1] == 17: # cheetah
+        if states.shape[-1] == 18: # cheetah
             states[..., -1:] = 0
-        elif states.shape[-1] == 24: # walker
+        elif states.shape[-1] == 27: # walker
             states[..., -3:] = 0
                         
         mask = (states != 0).float()
@@ -1450,8 +1450,9 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
         all_produced_trajectories.append(produced_trajectory)
     
         
-    np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)    
-    plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
+    np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)
+    if steps % (args.iql_training_steps // 10) == 0 or (steps == args.iql_training_steps):
+        plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
     
     
@@ -1986,7 +1987,6 @@ def main(args):
             clear_output(True)
             fig, axs = plt.subplots(1, 3, figsize=(18, 5))
             axs[0].plot(smooth_and_downsample(actor_losses))
-            axs[0].set_ylim(0,max(actor_losses[-100:]))
             axs[0].set_title("Actor Loss")
             
             axs[1].plot(smooth_and_downsample(v_losses))
@@ -2001,7 +2001,7 @@ def main(args):
             plt.close()
             
             
-        if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 10) == 0):
+        if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 100) == 0):
             benchmark_rewards = run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)
             
             rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)

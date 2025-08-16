@@ -500,19 +500,12 @@ class RewardGeneratorTransformer(nn.Module):
 
 
     def get_transformer_encoding(self, states, rewards, pad_mask):  
-        
-        print(states.shape)
-        print(states[0])
-        
+                
         if states.shape[-1] == 18: # cheetah
             states[..., -1:] = 0
         elif states.shape[-1] == 27: # walker
             states[..., -3:] = 0
-            
-        print(states[0])
-        
-        exit()
-        
+                            
         mask = (states != 0).float()
         # states = normalize_dataset_coords(states)
         states = states * mask
