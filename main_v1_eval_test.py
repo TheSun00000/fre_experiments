@@ -308,15 +308,20 @@ class GoalRewards:
 
 
 class UnsupervsiedReward:
-    def __init__(self, args, dataset):
+    def __init__(self, args, dataset, benchmarks):
         
         self.args = args
         self.dataset_trajectories = dataset.trajectories
         obs_len = self.dataset_trajectories.shape[-1]
         
-        self.linear_rewards = LinearRewards(N=10000, obs_len=obs_len)
-        self.mlp_rewards = MLPRewards(N=10000, obs_len=obs_len)
+        self.num_linear_rewards = args.num_unsupervised_reward_functions // 2
+        self.num_mlp_rewards = args.num_unsupervised_reward_functions - self.num_linear_rewards
+        
+        
+        self.linear_rewards = LinearRewards(N=self.num_linear_rewards, obs_len=obs_len)
+        self.mlp_rewards = MLPRewards(N=self.num_mlp_rewards, obs_len=obs_len)
         self.goal_rewards = GoalRewards()
+        self.benchmarks = benchmarks
     
         
     def sample_reward_function_fre(self, batch_size, num_random_samples):
@@ -331,35 +336,76 @@ class UnsupervsiedReward:
         reward_params = torch.zeros((batch_size, 128))
         random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
-        for b in range(batch_size):
-            # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
-            reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
+        if (self.num_linear_rewards + self.num_linear_rewards) >= 2:
             
-            # reward_type = 0
-            
-            reward_params[b, 0] = reward_type
-            if reward_type == 0:
-                goal = self.goal_rewards.sample_goals(1, self.dataset_trajectories)
-                goal = goal.repeat(1, 1)
-                r, param_id = self.goal_rewards(random_states[[b]], goals=goal)    
-                reward_params[b, 1:1+obs_len] = param_id
-                random_states[b, 0] = goal
-                r[0, 0] = 1.
+            for b in range(batch_size):
+                # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
                 
-            elif reward_type == 1:
-                param_id = self.linear_rewards.sample(1).unsqueeze(0)
-                r, param_id = self.linear_rewards(random_states[[b]], param_id)
-                reward_params[b, 1] = param_id
+                reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
                 
-            elif reward_type == 2:
-                param_id = self.mlp_rewards.sample(1).unsqueeze(0)
-                r, param_id = self.mlp_rewards(random_states[[b]], param_id) 
-                reward_params[b, 1] = param_id
+                # reward_type = 0
                 
-            random_states_rewards[b] = r
+                reward_params[b, 0] = reward_type
+                if reward_type == 0:
+                    goal = self.goal_rewards.sample_goals(1, self.dataset_trajectories)
+                    goal = goal.repeat(1, 1)
+                    r, param_id = self.goal_rewards(random_states[[b]], goals=goal)    
+                    reward_params[b, 1:1+obs_len] = param_id
+                    random_states[b, 0] = goal
+                    r[0, 0] = 1.
+                    
+                elif reward_type == 1:
+                    param_id = self.linear_rewards.sample(1).unsqueeze(0)
+                    r, param_id = self.linear_rewards(random_states[[b]], param_id)
+                    reward_params[b, 1] = param_id
+                    
+                elif reward_type == 2:
+                    param_id = self.mlp_rewards.sample(1).unsqueeze(0)
+                    r, param_id = self.mlp_rewards(random_states[[b]], param_id) 
+                    reward_params[b, 1] = param_id
+                    
+                random_states_rewards[b] = r
             
         return reward_params, random_states, random_states_rewards
 
+
+    def sample_reward_function_plus_evals(self, batch_size, num_random_samples):
+        
+        len_benchmarks = len(self.benchmarks)
+        eval_reward_ratio = len_benchmarks / (len_benchmarks + self.args.num_unsupervised_reward_functions)
+        eval_batch_size = int(batch_size * eval_reward_ratio)
+        random_batch_size = batch_size - eval_batch_size
+
+        num_trajectories, len_trajectory, obs_len = self.dataset_trajectories.shape
+
+        trajectories_idx = torch.randint(0, num_trajectories, (eval_batch_size*num_random_samples,))
+        states_idx = torch.randint(0, len_trajectory, (eval_batch_size*num_random_samples,))
+        eval_random_states = self.dataset_trajectories[trajectories_idx, states_idx] # get the random states
+        eval_random_states = eval_random_states.reshape(eval_batch_size, num_random_samples, obs_len).to(device)
+
+        eval_reward_params = torch.zeros((eval_batch_size, 128))
+        eval_random_states_rewards = torch.zeros((eval_batch_size, num_random_samples))
+
+        for i in range(eval_batch_size):
+            benchmark_id = random.randint(0, len_benchmarks-1)
+            benchmark_reward_function, benchmark_test_label, benchmark_param = self.benchmarks[benchmark_id]
+            
+            eval_random_states_rewards[i] = benchmark_reward_function(eval_random_states[[i]].cpu(), benchmark_param)
+            eval_reward_params[i, 0] = 5
+            eval_reward_params[i, 1] = benchmark_id
+
+
+        # Unsupervised reward function:
+
+        reward_params, random_states, random_states_rewards = self.sample_reward_function_fre(batch_size=random_batch_size, num_random_samples=128)
+
+
+        reward_params = torch.concat((eval_reward_params, reward_params))
+        random_states = torch.concat((eval_random_states, random_states))
+        random_states_rewards = torch.concat((eval_random_states_rewards, random_states_rewards))
+        
+        return reward_params, random_states, random_states_rewards
+    
 
     def get_reward(self, reward_params, random_states):
 
@@ -379,6 +425,12 @@ class UnsupervsiedReward:
                 rewards, _ = self.linear_rewards(obs=x, param_id=param[1].reshape(1, 1).repeat(x.shape[0], 1).long())
             elif (param[0] == 0):
                 rewards, _ = self.goal_rewards(obs=x, goals=param[1:obs_len+1].unsqueeze(0).repeat(x.shape[0], 1))
+            elif (param[0] == 5):
+                benchmark_id = int(param[1].item())
+                benchmark_reward_function, benchmark_test_label, benchmark_param = self.benchmarks[benchmark_id]
+                rewards = benchmark_reward_function(x.cpu(), benchmark_param)
+            else:
+                raise NotImplementedError(f'reward function with type {param[0]} is not implemented')
             
             all_rewards[b] = rewards.float()
 
@@ -1039,9 +1091,9 @@ class IQL(nn.Module):
         self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])        
         self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         
-        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
-        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
-        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=0.003)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=3e-4)
+        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
         self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, args.iql_training_steps)
         
         
@@ -1344,6 +1396,7 @@ def run_test_antamze(env, dataset, fre_network, iql_agent, benchmarks, benchmark
 
 def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmarks, steps, num_evals):
     fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
+    axs = axs.reshape(-1, 3)
 
     
     all_produced_trajectories = []
@@ -1524,7 +1577,6 @@ def main(args):
             (TestRewLoop().compute_reward, 'path_loop', None),
             (TestRewMatrixEdges().compute_reward, 'path_edges', None)
         ]
-        
 
     dataset_trajectories = torch.tensor(dataset['observations']).float()
     dataset_actions = torch.tensor(dataset['actions']).float()
@@ -1553,6 +1605,10 @@ def main(args):
     
     obs_len = dataset.trajectories.shape[-1]
     
+    benchmarks = [benchmarks[i] for i in args.benchmark_set]
+    
+    eval_reward_ratio = len(benchmarks) / (len(benchmarks) + args.num_unsupervised_reward_functions)
+    print('Eval reward ratio:', eval_reward_ratio)
     
     
     
@@ -1626,7 +1682,7 @@ def main(args):
         plt.close()
     
     elif args.method == 'fre':
-        unsupervsied_rewards = UnsupervsiedReward(args, dataset)  
+        unsupervsied_rewards = UnsupervsiedReward(args, dataset, benchmarks)  
     
     
     # FRE ########################################################################################################################################
@@ -1710,6 +1766,7 @@ def main(args):
     
     num_eval_states = 10_000
     fig, axs = plt.subplots(len(benchmarks), 2, figsize=(10, 4*len(benchmarks)))
+    axs = axs.reshape(-1, 2)
     
     for benchmark_id in range(len(benchmarks)):
 
@@ -1799,22 +1856,28 @@ def main(args):
         'bc_coefficient': 0.01
     }
 
-    iql_batch_size = 64
-    iql_num_states = 512
+    iql_batch_size = 32
+    iql_num_states = 64
 
 
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
 
         
         if args.method == 'fre':
-            reward_params, random_states, random_states_rewards = unsupervsied_rewards.sample_reward_function_fre(
+            # reward_params, random_states, random_states_rewards = unsupervsied_rewards.sample_reward_function_fre(
+            #     batch_size=iql_batch_size, num_random_samples=128
+            # )
+            reward_params, random_states, random_states_rewards = unsupervsied_rewards.sample_reward_function_plus_evals(
                 batch_size=iql_batch_size, num_random_samples=128
-            )
+            ) 
         elif args.method == 'rg':
+            raise NotImplementedError
             reward_params, random_states, random_states_rewards, mask = sample_reward_function_fre_RG(
                 reward_generator, dataset, 
                 batch_size=iql_batch_size, num_random_samples=128
             )
+        
+        
         
         
         
@@ -1836,12 +1899,9 @@ def main(args):
             if args.method == 'fre':
                 batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
             elif args.method == 'rg':
-                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
+                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)           
             
-            
-            # batch['rewards'] = benchmarks[3][0](batch['states'].flatten(0, 1).unsqueeze(0), 2).reshape(iql_batch_size, iql_num_states, 1)
-            
-
+        
         # Implicit Q-Learning
         
         if args.env_name == 'cheetah':
@@ -1906,9 +1966,7 @@ def main(args):
             log_probs = policy_out.log_prob(actions)
             bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
             policy_loss = torch.mean(q_loss_ + bc_loss)
-        
-        # diff = ((dist.loc - batch['actions'])**2).sum(-1, keepdim=True)
-        # actor_loss = (exp_a * diff).mean()
+                    
         
         iql_agent.actor_optim.zero_grad(set_to_none=True)
         policy_loss.backward()
@@ -1922,8 +1980,6 @@ def main(args):
         
 
         ########################################################################################
-
-
         
         
         if timestep % 5000 == 0:
@@ -1993,11 +2049,11 @@ def get_args():
 
     """
     
-    python main_modified.py --env_name walker --method fre --policy_extraction_method ddpg\
-            --reward_generator_training_steps 20000 --rg_dropout 0.5 \
-            --encoder_training_steps 10 \
+    python main_v1_eval_test.py --env_name walker --method fre --policy_extraction_method awr --benchmark_set 0 1 2 3 \
+            --num_unsupervised_reward_functions 0\
             --iql_training_steps 2 \
             --num_evals 5 \
+                
             --encoder_checkpoint models/2025-08-05_00-15-18_walker-fre/fre_network.pth \
             --iql_checkpoint models/2025-08-05_00-15-18_walker-fre/iql_agent.pth \
                
@@ -2005,15 +2061,18 @@ def get_args():
     """
                
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
-    parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
-    parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
+    parser.add_argument('--env_name', type=str, required=True, choices=['cheetah', 'walker'])
+    parser.add_argument('--method', type=str, choices=['fre'], required=True)
     parser.add_argument('--policy_extraction_method', type=str, choices=['awr', 'ddpg'], required=True)
+    parser.add_argument('--benchmark_set', nargs='+', type=int, required=True, help="List of benchmark ids")
     
-    parser.add_argument('--reward_generator_training_steps', type=int, required=True)
-    parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
-    parser.add_argument('--rg_checkpoint', type=str)
     
-    parser.add_argument('--encoder_training_steps', type=int, required=True)
+    # parser.add_argument('--reward_generator_training_steps', type=int, required=True)
+    # parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
+    # parser.add_argument('--rg_checkpoint', type=str)
+    
+    parser.add_argument('--num_unsupervised_reward_functions', type=int, required=True)
+    # parser.add_argument('--encoder_training_steps', type=int, required=True)
     parser.add_argument('--encoder_checkpoint', type=str)
     
     parser.add_argument('--iql_training_steps', type=int, required=True)
@@ -2034,7 +2093,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'{args.env_name}-{args.method}'
+    exp_name = f'rew_n_effect-{args.env_name}-{args.method}-{args.benchmark_set}-{args.num_unsupervised_reward_functions}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         
@@ -2049,6 +2108,7 @@ if __name__ == "__main__":
     
     args.LOGS_FOLDER = LOGS_FOLDER
     args.MODEL_SAVE_FOLDER = MODEL_SAVE_FOLDER
+    args.encoder_training_steps = 0
     
     for key, value in vars(args).items():
         print(f'{key}: {value}')
