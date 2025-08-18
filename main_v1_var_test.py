@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 import math
@@ -149,21 +150,21 @@ class FRENetwork(nn.Module):
 # [9]:
 class MLPRewards:
     def __init__(self, N, obs_len):
-
-        self.N = N
         
-        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32)) * np.sqrt(1/32)
-        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32)) * np.sqrt(16)
-        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1)) * np.sqrt(1/16)
+        self.param_w1 = torch.normal(0, 1, size=(N, obs_len, 32)) * np.sqrt(1/32)
+        self.param_b1 = torch.normal(0, 1, size=(N, 1, 32)) * np.sqrt(16)
+        self.param_w2 = torch.normal(0, 1, size=(N, 32, 1)) * np.sqrt(1/16)
         
         if obs_len == 18:
             self.param_w1[:, -1:] = 0
         elif obs_len == 27:
             self.param_w1[:, -3:] = 0
             
+    def __len__(self):
+        return self.param_w1.shape[0]
     
     def sample(self, N):
-        return torch.randint(0, self.N, (N,))
+        return torch.randint(0, len(self), (N,))
 
     def __call__(self, obs, param_id=None):
         """
@@ -178,7 +179,7 @@ class MLPRewards:
         device = obs.device
         
         if param_id is None:
-            param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
+            param_id = torch.randint(0, len(self), size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
         param1_w = self.param_w1[param_id_expanded].to(device)
@@ -201,11 +202,9 @@ class MLPRewards:
 
 class LinearRewards:
     def __init__(self, N, obs_len):
-
-        self.N = N
         
-        self.param_w1 = torch.rand(size=(self.N, obs_len, 1)) * 2 - 1
-        self.random_mask = torch.rand(size=(self.N, obs_len)) < 0.9
+        self.param_w1 = torch.rand(size=(N, obs_len, 1)) * 2 - 1
+        self.random_mask = torch.rand(size=(N, obs_len)) < 0.9
         
         random_mask_positive = np.random.randint(2, obs_len, size=(N,))
         self.random_mask[np.arange(N), random_mask_positive] = False # Force at least one positive weight.
@@ -216,10 +215,12 @@ class LinearRewards:
             self.param_w1[:, -3:] = 0
         elif obs_len == 29:
             self.random_mask[..., :2] = True
-            
+    
+    def __len__(self):
+        return self.param_w1.shape[0]
 
     def sample(self, N):
-        return torch.randint(0, self.N, (N,))
+        return torch.randint(0, len(self), (N,))
 
     def __call__(self, obs, param_id=None):
         """
@@ -234,7 +235,7 @@ class LinearRewards:
         device = obs.device
         
         if param_id is None:
-            param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
+            param_id = torch.randint(0, len(self), size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
         param1_w = self.param_w1[param_id_expanded].to(device)
@@ -313,8 +314,8 @@ class UnsupervsiedReward:
         self.dataset_trajectories = dataset.trajectories
         obs_len = self.dataset_trajectories.shape[-1]
         
-        self.linear_rewards = LinearRewards(N=10000, obs_len=obs_len)
-        self.mlp_rewards = MLPRewards(N=10000, obs_len=obs_len)
+        self.linear_rewards = LinearRewards(N=10, obs_len=obs_len)
+        self.mlp_rewards = MLPRewards(N=10, obs_len=obs_len)
         self.goal_rewards = GoalRewards()
     
         
@@ -332,9 +333,10 @@ class UnsupervsiedReward:
 
         for b in range(batch_size):
             # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
-            reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
+            # reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
             
-            # reward_type = 0
+            linear_rewards_ratio = len(self.linear_rewards) / (len(self.linear_rewards) + len(self.mlp_rewards))
+            reward_type = 1 if random.random() < linear_rewards_ratio else 2
             
             reward_params[b, 0] = reward_type
             if reward_type == 0:
@@ -382,6 +384,50 @@ class UnsupervsiedReward:
             all_rewards[b] = rewards.float()
 
         return all_rewards
+
+
+def get_best_reward_function_ids(args, dataset: Dataset, unsupervsied_rewards: UnsupervsiedReward):
+    stds = []
+
+    for reward_type in [1, 2]:
+
+        num_functions = len(unsupervsied_rewards.linear_rewards) if reward_type == 1 else len(unsupervsied_rewards.mlp_rewards)
+        
+        for i in tqdm(range(num_functions)):
+        
+            with torch.no_grad():
+                
+                reward_params = torch.zeros((1, 128))
+                reward_params[0, 0] = reward_type
+                reward_params[0, 1] = i
+                
+                r = unsupervsied_rewards.get_reward(reward_params, random_states=dataset.trajectories[::10, ::10].reshape(1, -1, args.state_dim))
+                std = r.reshape(1000, 100).mean(dim=1).std().item()
+                stds.append(std)
+            
+            # print(std)
+            
+        
+    stds = torch.tensor(stds)
+
+    plt.plot()
+    _ = plt.hist(stds, bins=100)
+    plt.xlabel('Reward expressiveness')
+    plt.title(f'Histogram of the expressiveness of {len(unsupervsied_rewards.linear_rewards)+len(unsupervsied_rewards.mlp_rewards)} reward functions on {args.env_name}')
+    plt.savefig(f"{args.LOGS_FOLDER}/rewards_var_hist.png")
+
+    sorted_ids = stds.argsort()
+
+
+    top_rewards_ids = sorted_ids[-args.topk_rewards:]
+    
+    len_linear_rewards = len(unsupervsied_rewards.linear_rewards)
+    
+    ids_to_keep_linear = top_rewards_ids[(top_rewards_ids // len_linear_rewards) == 0] % len_linear_rewards
+    ids_to_keep_mlp = top_rewards_ids[(top_rewards_ids // len_linear_rewards) == 1] % len_linear_rewards
+    
+    return ids_to_keep_linear, ids_to_keep_mlp
+
 
 
 # FRE ####################################################################################################################
@@ -505,7 +551,7 @@ class RewardGeneratorTransformer(nn.Module):
             states[..., -1:] = 0
         elif states.shape[-1] == 27: # walker
             states[..., -3:] = 0
-                            
+        
         mask = (states != 0).float()
         # states = normalize_dataset_coords(states)
         states = states * mask
@@ -694,7 +740,7 @@ class RewardGenerator:
         pad_mask = pad_mask.to(device)
         
         state_dim = anchors.shape[-1]
-        mask = self.generate_boolean_mask(batch_size, state_dim, p=0.0)
+        mask = self.generate_boolean_mask(batch_size, state_dim, p=0.5)
         if anchors.shape[-1] == 29: # antmaze
             mask[info['reward_types'] == 0, :2] = 1
             mask[info['reward_types'] == 0, 2:] = 0
@@ -961,7 +1007,7 @@ class MLP(nn.Module):
         # Add hidden layers with Mish activation and LayerNorm
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.Mish())
+            layers.append(nn.ReLU())
             # layers.append(nn.LayerNorm(hidden_dim))
             prev_dim = hidden_dim  # Update input size for next layer
         
@@ -1006,17 +1052,19 @@ class Actor(nn.Module):
         self.model = MLP(input_dim, hidden_dims, output_dim=action_dim)  # MLP only predicts mean
         
         # Learnable log standard deviation (initialized to `init_std`)
-        self.log_std = nn.Parameter(torch.ones(action_dim) * init_std)
+        self.log_std = nn.Parameter(torch.zeros(action_dim, dtype=torch.float32))
+        
 
     def forward(self, x, temperature=1.0):
         mean = self.model(x)  # Predict action mean
+        mean = torch.nn.functional.tanh(mean)
 
-        log_std = torch.clip(self.log_std, -20, 2)
-        mean = torch.clip(mean, -5, 5)
+        log_std = torch.clip(self.log_std, -5.0, 2.0)
+        # mean = torch.clip(mean, -5, 5)
 
-        return torch.distributions.Normal(
+        return torch.distributions.MultivariateNormal(
             mean, 
-            torch.exp(log_std)*temperature
+            scale_tril=torch.diag(torch.exp(log_std))
         )
 
 
@@ -1028,17 +1076,17 @@ class IQL(nn.Module):
         super(IQL, self).__init__()
         self.obs_len = state_dim
                 
-        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.critic = Critic(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         self.target_critic = copy.deepcopy(self.critic)
         for param in self.target_critic.parameters():
             param.requires_grad = False
         
-        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[256, 256])        
-        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[256, 256])
+        self.value = ValueCritic(w_dim + state_dim, hidden_dims=[512, 512, 512])        
+        self.actor = Actor(w_dim + state_dim, action_dim, hidden_dims=[512, 512, 512])
         
-        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=0.003)
-        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=0.003)
-        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=0.003)
+        self.critic_optim = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.value_optim = torch.optim.Adam(self.value.parameters(), lr=3e-4)
+        self.actor_optim = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
         self.actor_lr_schedule = CosineAnnealingLR(self.actor_optim, args.iql_training_steps)
         
         
@@ -1060,24 +1108,13 @@ class IQL(nn.Module):
     
     
     
-def update_target_critic(critic, target_critic, tau):
-
-    critic_state_dict = critic.state_dict()
-    target_critic_state_dict = target_critic.state_dict()
-
-    for key in critic_state_dict:
-        target_critic_state_dict[key] = tau * critic_state_dict[key] + (1 - tau) * target_critic_state_dict[key]
-
-    target_critic.load_state_dict(target_critic_state_dict)
+def update_target_critic(source, target, alpha):
+    for target_param, source_param in zip(target.parameters(), source.parameters()):
+        target_param.data.mul_(1. - alpha).add_(source_param.data, alpha=alpha)
     
 
 def expectile_loss(u, expectile=0.7):
-    weight = torch.where(
-        u.detach() >= 0, 
-        torch.tensor(expectile, dtype=u.dtype), 
-        torch.tensor(1 - expectile, dtype=u.dtype)
-    )
-    return weight * (u ** 2)
+    return torch.abs(expectile - (u < 0).float()) * u**2
 
 
 def smooth_and_downsample(losses, smoothing=0.9, max_points=100):
@@ -1250,9 +1287,11 @@ def run_test_dmc(env, dataset, fre_network, iql_agent, benchmarks, benchmark_id,
                 # elif tensor_state.shape[-1] == 24: # walker
                 #     tensor_state[..., -3:] = 0
                 
-                dist = iql_agent.get_actor(w_mean, tensor_state)
-                action = dist.loc.cpu()
-                action = np.array(action[0]).clip(-1, 1)
+                # dist = iql_agent.get_actor(w_mean, tensor_state)
+                # action = dist.loc.cpu()
+                # action = np.array(action[0]).clip(-1, 1)
+                
+                action = iql_agent.get_actor(w_mean, tensor_state).mean.cpu().numpy()
 
             timestep = env.step(action)
             
@@ -1325,11 +1364,14 @@ def run_test_antamze(env, dataset, fre_network, iql_agent, benchmarks, benchmark
             
             with torch.no_grad():
                 tensor_state = torch.tensor(state).reshape(1, -1).to(device).float()
-                dist = iql_agent.get_actor(w_mean, tensor_state)
-                action = dist.loc.cpu()
-                action = np.array(action[0]).clip(-1, 1)
-
+                # dist = iql_agent.get_actor(w_mean, tensor_state)
+                # action = dist.loc.cpu()
+                # action = np.array(action[0]).clip(-1, 1)
                 
+                action = iql_agent.get_actor(w_mean, tensor_state).mean.cpu().numpy().reshape(-1)
+                
+                
+
             new_state, _, _, _ = env.step(action)
             
             state = new_state
@@ -1400,14 +1442,16 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
         all_produced_trajectories.append(produced_trajectory)
     
         
-    np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)    
-    plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
+    np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)
+    if args.iql_training_steps < 10 or steps % (args.iql_training_steps // 10) == 0 or (steps == args.iql_training_steps):
+        plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
     
     
     all_produced_trajectories = np.stack(all_produced_trajectories)
     state_dim = all_produced_trajectories.shape[-1]
     
+    benchmark_rewards = []
     
     for benchmark_id in range(len(benchmarks)):
 
@@ -1429,6 +1473,12 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
         print('\tRewards:', trajectory_rewards.tolist())
         print('\tmean:', trajectory_rewards.mean().item())
         print('\tstd:', trajectory_rewards.std().item())
+        
+        benchmark_rewards.append(trajectory_rewards.mean().item())
+
+    benchmark_rewards = np.array(benchmark_rewards)
+    
+    return benchmark_rewards
 
 
 
@@ -1623,7 +1673,22 @@ def main(args):
     
     elif args.method == 'fre':
         unsupervsied_rewards = UnsupervsiedReward(args, dataset)  
+
+        
+        
+    ids_to_keep_linear, ids_to_keep_mlp = get_best_reward_function_ids(args, dataset, unsupervsied_rewards)
     
+    unsupervsied_rewards.linear_rewards.param_w1 = unsupervsied_rewards.linear_rewards.param_w1[ids_to_keep_linear]
+    unsupervsied_rewards.linear_rewards.random_mask = unsupervsied_rewards.linear_rewards.random_mask[ids_to_keep_linear]
+
+    unsupervsied_rewards.mlp_rewards.param_w1 = unsupervsied_rewards.mlp_rewards.param_w1[ids_to_keep_mlp]
+    unsupervsied_rewards.mlp_rewards.param_b1 = unsupervsied_rewards.mlp_rewards.param_b1[ids_to_keep_mlp]
+    unsupervsied_rewards.mlp_rewards.param_w2 = unsupervsied_rewards.mlp_rewards.param_w2[ids_to_keep_mlp]
+    
+    print('Unsupervised reward functions filtered !')
+    print(f'Linear rewards:', len(unsupervsied_rewards.linear_rewards))
+    print(f'MLP rewards:', len(unsupervsied_rewards.mlp_rewards))
+        
     
     # FRE ########################################################################################################################################
         
@@ -1781,20 +1846,22 @@ def main(args):
     v_losses, q_losses = [], []
     mse_errors = []
     stds = []
+    rewards_logs = np.zeros((len(benchmarks), 0),)
 
 
     # [451]:
 
 
     config = {
-        'expectile': 0.8,
+        'expectile': 0.9,
         'temperature': 3.0,
         'discount': 0.99,
         'tau': 0.005,
+        'bc_coefficient': 0.01
     }
 
-    iql_batch_size = 64
-    iql_num_states = 512
+    iql_batch_size = 1
+    iql_num_states = 1024
 
 
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
@@ -1827,11 +1894,15 @@ def main(args):
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)
             # w_mean = torch.zeros_like(w_mean) ############################################################################### !!!!!!!!!
         
-            if args.method == 'fre':
-                batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
-            elif args.method == 'rg':
-                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
+            # if args.method == 'fre':
+            #     batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
+            # elif args.method == 'rg':
+            #     batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
             
+            benchmark_id = 3
+            batch['rewards'] = benchmarks[benchmark_id][0](
+                batch['next_states'].flatten(0, 1).unsqueeze(0).cpu(), benchmarks[benchmark_id][2]
+            ).reshape(iql_batch_size, iql_num_states, 1).to(device)
             
             # batch['rewards'] = benchmarks[3][0](batch['states'].flatten(0, 1).unsqueeze(0), 2).reshape(iql_batch_size, iql_num_states, 1)
             
@@ -1846,99 +1917,84 @@ def main(args):
             batch['next_states'] = batch['next_states'][..., :-3]
         
         
+        observations = batch['states']
+        next_observations = batch['next_states']
+        actions = batch['actions']
+        terminals = (1. - batch['masks'].float())
+        rewards = batch['rewards']
+        
         w_target = w_mean.unsqueeze(1).repeat(1, batch['states'].shape[1], 1)
         
+        
         with torch.no_grad():
-            
-            target_q1, target_q2 = iql_agent.get_target_critic(w_target, batch['states'], batch['actions'])
-            target_q1, target_q2 = target_q1.detach(), target_q2.detach()
-            target_q = torch.minimum(target_q1, target_q2)
-            next_v = iql_agent.get_value(w_target, batch['next_states']).detach()
+            target_q1, target_q2 = iql_agent.get_target_critic(w_target, observations, actions)
+            target_q = torch.min(target_q1, target_q2)
+            next_v = iql_agent.get_value(w_target, next_observations).detach()
         
         
         # Value Loss: Update V towards expectile of min(q1, q2).
         
-        v = iql_agent.get_value(w_target, batch['states'])
+        v = iql_agent.get_value(w_target, observations)
         adv = target_q - v    
-        v_loss = expectile_loss(adv, config['expectile'])
-        v_loss = v_loss.mean()
-
-        iql_agent.value.zero_grad(set_to_none=True)
+        v_loss = expectile_loss(adv, config['expectile']).mean()
+        iql_agent.value_optim.zero_grad(set_to_none=True)
         v_loss.backward()
         iql_agent.value_optim.step()
 
-        # Critic Loss. Update Q = r #############################
-        targets = batch['rewards'] + config['discount'] * batch['masks'] * next_v
 
-        q1, q2 = iql_agent.get_critic(w_target, batch['states'], batch['actions'])
-        q_loss = ((q1 - targets).pow(2).mean() + (q2 - targets).pow(2).mean()) / 2
-        
-        iql_agent.critic.zero_grad(set_to_none=True)
+
+        # Critic Loss. Update Q = r #############################
+        targets = rewards + (1. - terminals.float()) * config['discount'] * next_v.detach()
+        q1, q2 = iql_agent.get_critic(w_target, observations, actions)
+        q_loss = (F.mse_loss(q1, targets) + F.mse_loss(q2, targets)) / 2 
+        iql_agent.critic_optim.zero_grad(set_to_none=True)
         q_loss.backward()
         iql_agent.critic_optim.step()
 
+        # if timestep % 10 == 0:
         update_target_critic(iql_agent.critic, iql_agent.target_critic, config['tau'])
-
-        value_loss = v_loss + q_loss
-        value_info = {
-            'v_loss': v_loss,
-            'q_loss': q_loss,
-            'v': v.mean(),
-            'q': torch.minimum(q1, q2).mean(),
-        }
 
 
         # Actor Loss ############################################
 
-
-        adv = (target_q - v).detach()
-        actions = batch['actions']
-        exp_a = torch.exp(adv.detach() * config['temperature']).clamp(max=100)
+        if args.policy_extraction_method == 'awr':
+            exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)        
+            policy_out = iql_agent.get_actor(w_target, observations)
+            bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
+            print((exp_adv * bc_losses).shape)
+            policy_loss = torch.mean(exp_adv * bc_losses)
         
-        dist = iql_agent.get_actor(w_target, batch['states'])
-        log_probs = dist.log_prob(actions)
-        actor_loss = -(exp_a * log_probs).mean()
-
-        std = dist.stddev.mean()
-        mse_error = ((dist.loc - batch['actions'])**2).mean()
+        elif args.policy_extraction_method == 'ddpg':
+            policy_out = iql_agent.get_actor(w_target, observations)
+            q1, q2 = iql_agent.get_critic(w_target, observations, policy_out.mean)
+            q = (q1 + q2) / 2
+            q_loss_ = -q.mean()
+            log_probs = policy_out.log_prob(actions)
+            bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
+            policy_loss = torch.mean(q_loss_ + bc_loss)
+            
+            print(q1.shape, q2.shape, q_loss_.shape, log_probs.shape, bc_loss.shape)
         
-        # diff = ((dist.loc - batch['actions'])**2).sum(-1, keepdim=True)
-        # actor_loss = (exp_a * diff).mean()
         
-        iql_agent.actor.zero_grad(set_to_none=True)
-        actor_loss.backward()
+        iql_agent.actor_optim.zero_grad(set_to_none=True)
+        policy_loss.backward()
         iql_agent.actor_optim.step()
         iql_agent.actor_lr_schedule.step()
         
-        actor_info = {
-            'actor_loss': actor_loss,
-            'std': std,
-            'adv': adv.mean(),
-            'mse_error': mse_error,
-        }
 
-        ########################################################################################
-        
-        # loss = value_loss + actor_loss
-        
-        # optimizer.zero_grad()
-        # loss.backward()
-        # optimizer.step()
-
-        
-        
-        
-        actor_losses.append(actor_loss.item())
+        actor_losses.append(policy_loss.item())
         v_losses.append(v_loss.item())
         q_losses.append(q_loss.item())
-        mse_errors.append(mse_error.item())
-        stds.append(std.item())
         
-        if timestep % 100 == 0:
+
+        ########################################################################################
+
+        
+        
+        if timestep % 5000 == 0:
             clear_output(True)
-            fig, axs = plt.subplots(1, 5, figsize=(30, 5))
+            fig, axs = plt.subplots(1, 3, figsize=(18, 5))
             axs[0].plot(smooth_and_downsample(actor_losses))
-            axs[0].set_ylim(0,max(actor_losses[-100:]))
             axs[0].set_title("Actor Loss")
             
             axs[1].plot(smooth_and_downsample(v_losses))
@@ -1948,19 +2004,30 @@ def main(args):
             axs[2].plot(smooth_and_downsample(q_losses))
             axs[2].set_ylim(0,max(q_losses[-100:]))
             axs[2].set_title("Q Loss")
-            
-            axs[3].plot(smooth_and_downsample(mse_errors))
-            axs[3].set_ylim(0,max(mse_errors[-100:]))
-            axs[3].set_title("MSE Errors")
-            
-            axs[4].plot(smooth_and_downsample(stds))
-            axs[4].set_title("std")
 
             plt.savefig(f"{args.LOGS_FOLDER}/iql_training_losses.png")
             plt.close()
             
-        if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 10) == 0):
-            run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)            
+            
+        if (args.iql_training_steps < 10) or (timestep % (args.iql_training_steps // 100) == 0):
+            benchmark_rewards = run_benchmark(args, env, dataset, fre_network, iql_agent, benchmarks, steps=timestep, num_evals=args.num_evals)
+            
+            rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
+            # print(rewards_logs)
+            num_cols = 4
+            num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
+            fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
+            axs = axs.flatten()
+            
+            for i in range(len(benchmarks)):
+                _, benchmark_test_label, _ = benchmarks[i]
+                axs[i].plot(rewards_logs[i])
+                axs[i].set_title(benchmark_test_label)
+            
+            plt.savefig(f"{args.LOGS_FOLDER}/rewards.png")
+            plt.close()
+            
+                      
             torch.save(iql_agent.state_dict(), f"{args.MODEL_SAVE_FOLDER}/iql_agent.pth")
 
     
@@ -1990,25 +2057,24 @@ def get_args():
 
     """
     
-    python main.py --env_name walker --method fre \
+    python main_v1_var_test.py --env_name walker --method fre --policy_extraction_method ddpg\
             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
-            --encoder_training_steps 10 \
+            --topk_rewards 1000 --encoder_training_steps 10 \
             --iql_training_steps 2 \
-            --num_evals 5 \
-            --encoder_checkpoint models/2025-08-05_00-15-18_walker-fre/fre_network.pth \
-            --iql_checkpoint models/2025-08-05_00-15-18_walker-fre/iql_agent.pth \
-               
+            --num_evals 5               
     
     """
                
     parser = argparse.ArgumentParser(description="Training and Evaluation Parameters")
     parser.add_argument('--env_name', type=str, required=True, choices=['antmaze', 'cheetah', 'walker'])
     parser.add_argument('--method', type=str, choices=['fre', 'rg'], required=True)
+    parser.add_argument('--policy_extraction_method', type=str, choices=['awr', 'ddpg'], required=True)
     
     parser.add_argument('--reward_generator_training_steps', type=int, required=True)
     parser.add_argument('--rg_dropout', type=float, default=0.5, help='the dropout probality of masking features during reward generation')
     parser.add_argument('--rg_checkpoint', type=str)
     
+    parser.add_argument('--topk_rewards', type=int, required=True)
     parser.add_argument('--encoder_training_steps', type=int, required=True)
     parser.add_argument('--encoder_checkpoint', type=str)
     
@@ -2030,7 +2096,7 @@ if __name__ == "__main__":
     now = datetime.now()
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
-    exp_name = f'{args.env_name}-{args.method}'
+    exp_name = f'{args.env_name}-topkR:{args.topk_rewards}'
     if args.file_suffix:
         exp_name = f'{exp_name}-{args.file_suffix}'
         
