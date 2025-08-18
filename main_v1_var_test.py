@@ -314,8 +314,8 @@ class UnsupervsiedReward:
         self.dataset_trajectories = dataset.trajectories
         obs_len = self.dataset_trajectories.shape[-1]
         
-        self.linear_rewards = LinearRewards(N=10, obs_len=obs_len)
-        self.mlp_rewards = MLPRewards(N=10, obs_len=obs_len)
+        self.linear_rewards = LinearRewards(N=10000, obs_len=obs_len)
+        self.mlp_rewards = MLPRewards(N=10000, obs_len=obs_len)
         self.goal_rewards = GoalRewards()
     
         
@@ -1860,8 +1860,8 @@ def main(args):
         'bc_coefficient': 0.01
     }
 
-    iql_batch_size = 1
-    iql_num_states = 1024
+    iql_batch_size = 32
+    iql_num_states = 64
 
 
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
@@ -1894,17 +1894,10 @@ def main(args):
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)
             # w_mean = torch.zeros_like(w_mean) ############################################################################### !!!!!!!!!
         
-            # if args.method == 'fre':
-            #     batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
-            # elif args.method == 'rg':
-            #     batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
-            
-            benchmark_id = 3
-            batch['rewards'] = benchmarks[benchmark_id][0](
-                batch['next_states'].flatten(0, 1).unsqueeze(0).cpu(), benchmarks[benchmark_id][2]
-            ).reshape(iql_batch_size, iql_num_states, 1).to(device)
-            
-            # batch['rewards'] = benchmarks[3][0](batch['states'].flatten(0, 1).unsqueeze(0), 2).reshape(iql_batch_size, iql_num_states, 1)
+            if args.method == 'fre':
+                batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
+            elif args.method == 'rg':
+                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
             
 
         # Implicit Q-Learning
@@ -1961,7 +1954,6 @@ def main(args):
             exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)        
             policy_out = iql_agent.get_actor(w_target, observations)
             bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
-            print((exp_adv * bc_losses).shape)
             policy_loss = torch.mean(exp_adv * bc_losses)
         
         elif args.policy_extraction_method == 'ddpg':
@@ -1972,9 +1964,7 @@ def main(args):
             log_probs = policy_out.log_prob(actions)
             bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
             policy_loss = torch.mean(q_loss_ + bc_loss)
-            
-            print(q1.shape, q2.shape, q_loss_.shape, log_probs.shape, bc_loss.shape)
-        
+                    
         
         iql_agent.actor_optim.zero_grad(set_to_none=True)
         policy_loss.backward()
@@ -2059,7 +2049,7 @@ def get_args():
     
     python main_v1_var_test.py --env_name walker --method fre --policy_extraction_method ddpg\
             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
-            --topk_rewards 1000 --encoder_training_steps 10 \
+            --topk_rewards 10000 --encoder_training_steps 10 \
             --iql_training_steps 2 \
             --num_evals 5               
     

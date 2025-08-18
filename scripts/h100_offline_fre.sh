@@ -25,9 +25,33 @@ ls /usr/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
 
+python main_v1.py --env_name walker --method rg --policy_extraction_method ddpg\
+            --reward_generator_training_steps 1 --rg_dropout 0.5 \
+            --encoder_training_steps 0 \
+            --iql_training_steps 1000000 \
+            --num_evals 5 \
+            # --encoder_checkpoint models/2025-08-15_19-32-35_walker-fre-awr/fre_network.pth \
 
 
-python iql_dmc.py
+# python main_v1_var_test.py --env_name walker --method fre --policy_extraction_method ddpg\
+#             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
+#             --topk_rewards 20000 --encoder_training_steps 0 \
+#             --iql_training_steps 1000000 \
+#             --num_evals 5 \
+#             --encoder_checkpoint models/2025-08-15_19-32-35_walker-fre-awr/fre_network.pth \
+
+
+
+# python main_v1_eval_test.py --env_name walker --method fre --policy_extraction_method ddpg --benchmark_set 3 \
+#             --num_unsupervised_reward_functions 0\
+#             --iql_training_steps 1000000 \
+#             --num_evals 5 \
+#             --encoder_checkpoint models/2025-08-15_19-32-35_walker-fre-awr/fre_network.pth \
+
+
+
+
+# python iql_dmc.py
 
 # python main-ogbench.py --env_name antmaze-large-navigate-v0 --method fre \
 #             --reward_generator_training_steps 20000 --rg_dropout 0.5 \

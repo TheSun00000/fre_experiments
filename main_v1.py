@@ -1800,8 +1800,8 @@ def main(args):
         'bc_coefficient': 0.01
     }
 
-    iql_batch_size = 1
-    iql_num_states = 1024
+    iql_batch_size = 32
+    iql_num_states = 64
 
 
     for timestep in tqdm(range(1, args.iql_training_steps+1)):
@@ -1832,20 +1832,12 @@ def main(args):
         
         with torch.no_grad():
             w_mean, _ = fre_network.get_transformer_encoding(reward_state_pairs)
-            # w_mean = torch.zeros_like(w_mean) ############################################################################### !!!!!!!!!
         
-            # if args.method == 'fre':
-            #     batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
-            # elif args.method == 'rg':
-            #     batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
-            
-            benchmark_id = 3
-            batch['rewards'] = benchmarks[benchmark_id][0](
-                batch['next_states'].flatten(0, 1).unsqueeze(0).cpu(), benchmarks[benchmark_id][2]
-            ).reshape(iql_batch_size, iql_num_states, 1).to(device)
-            
-            # batch['rewards'] = benchmarks[3][0](batch['states'].flatten(0, 1).unsqueeze(0), 2).reshape(iql_batch_size, iql_num_states, 1)
-            
+            if args.method == 'fre':
+                batch['rewards'] = unsupervsied_rewards.get_reward(reward_params=reward_params, random_states=batch['states']).unsqueeze(-1)
+            elif args.method == 'rg':
+                batch['rewards'] = get_reward_RG(reward_generator, reward_params=reward_params, mask=mask, random_states=batch['states']).unsqueeze(-1)
+
 
         # Implicit Q-Learning
         
@@ -1928,8 +1920,6 @@ def main(args):
         
 
         ########################################################################################
-
-        exit()
 
         
         
