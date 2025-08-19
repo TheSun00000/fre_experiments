@@ -1893,7 +1893,6 @@ def main(args):
             exp_adv = torch.exp(config['temperature'] * adv.detach()).clamp(max=100.)        
             policy_out = iql_agent.get_actor(w_target, observations)
             bc_losses = -policy_out.log_prob(actions).unsqueeze(-1)
-            print((exp_adv * bc_losses).shape)
             policy_loss = torch.mean(exp_adv * bc_losses)
         
         elif args.policy_extraction_method == 'ddpg':
@@ -1905,7 +1904,6 @@ def main(args):
             bc_loss = -((config['bc_coefficient'] * log_probs)).mean()
             policy_loss = torch.mean(q_loss_ + bc_loss)
             
-            print(q1.shape, q2.shape, q_loss_.shape, log_probs.shape, bc_loss.shape)
         
         
         iql_agent.actor_optim.zero_grad(set_to_none=True)
