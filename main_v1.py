@@ -2057,7 +2057,7 @@ if __name__ == "__main__":
     
     exp_name = f'{args.env_name}-{args.method}'
     if args.file_suffix:
-        exp_name = f'{exp_name}-{args.file_suffix}-{policy_extraction_method}'
+        exp_name = f'{exp_name}-{args.file_suffix}-{args.policy_extraction_method}'
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
