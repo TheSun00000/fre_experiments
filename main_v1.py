@@ -332,8 +332,10 @@ class UnsupervsiedReward:
         random_states_rewards = torch.zeros((batch_size, num_random_samples))
 
         for b in range(batch_size):
-            # reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
-            reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
+            if 'antmaze' in self.args.env_name:
+                reward_type = torch.randint(0, 3, (1,)) # 0: goal_reaching | 1: linear_reward | 2: mlp_reward
+            else:
+                reward_type = torch.randint(1, 3, (1,))   # 1: linear_reward | 2: mlp_reward
             
             # reward_type = 0
             
@@ -1425,7 +1427,7 @@ def run_benchmark(args, env, dataset: Dataset, fre_network, iql_agent, benchmark
     
         
     np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)
-    if steps % (args.iql_training_steps // 10) == 0 or (steps == args.iql_training_steps):
+    if (args.iql_training_steps < 10) or steps % (args.iql_training_steps // 10) == 0 or (steps == args.iql_training_steps):
         plt.savefig(f"{args.LOGS_FOLDER}/benchmark-steps:{steps}.png")
     plt.close()
     
@@ -2014,7 +2016,7 @@ def get_args():
 
     """
     
-    python main_modified.py --env_name walker --method fre --policy_extraction_method ddpg\
+    python main_v1.py --env_name walker --method fre --policy_extraction_method ddpg\
             --reward_generator_training_steps 20000 --rg_dropout 0.5 \
             --encoder_training_steps 10 \
             --iql_training_steps 2 \
