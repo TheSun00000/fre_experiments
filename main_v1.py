@@ -153,9 +153,9 @@ class MLPRewards:
 
         self.N = N
         
-        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32)) * np.sqrt(1/32)
-        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32)) * np.sqrt(16)
-        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1)) * np.sqrt(1/16)
+        self.param_w1 = torch.normal(0, 1, size=(self.N, obs_len, 32), device=device) * np.sqrt(1/32)
+        self.param_b1 = torch.normal(0, 1, size=(self.N, 1, 32), device=device) * np.sqrt(16)
+        self.param_w2 = torch.normal(0, 1, size=(self.N, 32, 1), device=device) * np.sqrt(1/16)
         
         if obs_len == 18:
             self.param_w1[:, -1:] = 0
@@ -182,9 +182,9 @@ class MLPRewards:
             param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded].to(device)
-        param1_b = self.param_b1[param_id_expanded].to(device)
-        param2_w = self.param_w2[param_id_expanded].to(device)
+        param1_w = self.param_w1[param_id_expanded]
+        param1_b = self.param_b1[param_id_expanded]
+        param2_w = self.param_w2[param_id_expanded]
 
         # obs[..., 2:] = 0.0
 
@@ -205,8 +205,8 @@ class LinearRewards:
 
         self.N = N
         
-        self.param_w1 = torch.rand(size=(self.N, obs_len, 1)) * 2 - 1
-        self.random_mask = torch.rand(size=(self.N, obs_len)) < 0.9
+        self.param_w1 = torch.rand(size=(self.N, obs_len, 1), device=device) * 2 - 1
+        self.random_mask = torch.rand(size=(self.N, obs_len), device=device) < 0.9
         
         random_mask_positive = np.random.randint(2, obs_len, size=(N,))
         self.random_mask[np.arange(N), random_mask_positive] = False # Force at least one positive weight.
@@ -238,8 +238,8 @@ class LinearRewards:
             param_id = torch.randint(0, self.N, size=(obs.shape[0], 1))
         
         param_id_expanded = param_id.repeat(1, obs.shape[1]).cpu()
-        param1_w = self.param_w1[param_id_expanded].to(device)
-        mask = self.random_mask[param_id_expanded].to(device)
+        param1_w = self.param_w1[param_id_expanded]
+        mask = self.random_mask[param_id_expanded]
         obs = (~mask) * obs
         
         x = torch.unsqueeze(obs, -2) # [batch, (pairs), 1, features_in]
@@ -361,7 +361,7 @@ class UnsupervsiedReward:
         return reward_params, random_states, random_states_rewards
 
 
-    def get_reward(self, reward_params, random_states):
+    def get_reward_2(self, reward_params, random_states):
 
         assert len(reward_params.shape) == 2
         assert len(random_states.shape) == 3
@@ -383,6 +383,33 @@ class UnsupervsiedReward:
             all_rewards[b] = rewards.float()
 
         return all_rewards
+
+
+    def get_reward(self, reward_params, random_states):
+
+        assert len(reward_params.shape) == 2
+        assert len(random_states.shape) == 3
+        assert reward_params.shape[0] == random_states.shape[0]
+        
+        all_rewards = torch.zeros((random_states.shape[0], random_states.shape[1]), device=device)
+
+        for reward_type in [1, 2]:
+            mask = (reward_params[:, 0] == reward_type)
+            params = reward_params[mask, 1].reshape(-1, 1).long()
+            x = random_states[mask]
+            
+
+            if reward_type == 1:
+                rewards, _ = self.linear_rewards(obs=x, param_id=params)
+            elif reward_type == 2:
+                rewards, _ = self.mlp_rewards(obs=x, param_id=params)
+            else:
+                raise NotImplementedError
+                
+            all_rewards[mask] = rewards
+
+
+        return all_rewards.float()
 
 
 # FRE ####################################################################################################################
@@ -2030,7 +2057,7 @@ if __name__ == "__main__":
     
     exp_name = f'{args.env_name}-{args.method}'
     if args.file_suffix:
-        exp_name = f'{exp_name}-{args.file_suffix}'
+        exp_name = f'{exp_name}-{args.file_suffix}-{policy_extraction_method}'
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'

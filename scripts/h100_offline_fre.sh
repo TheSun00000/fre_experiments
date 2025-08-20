@@ -25,12 +25,12 @@ ls /usr/lib/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/nvidia
 
 
-python main_v1.py --env_name cheetah --method fre --policy_extraction_method ddpg\
-            --reward_generator_training_steps 1 --rg_dropout 0.5 \
-            --encoder_training_steps 0 \
+python main_v1.py --env_name walker --method rg --policy_extraction_method awr\
+            --reward_generator_training_steps 20000 --rg_dropout 0.5 \
+            --encoder_training_steps 50000 \
             --iql_training_steps 1000000 \
             --num_evals 5 \
-            --encoder_checkpoint models/2025-08-15_19-28-25_cheetah-fre-awr/fre_network.pth \
+            # --encoder_checkpoint models/2025-08-15_19-28-25_cheetah-fre-awr/fre_network.pth \
 
 
 # python main_v1_var_test.py --env_name walker --method fre --policy_extraction_method ddpg\
