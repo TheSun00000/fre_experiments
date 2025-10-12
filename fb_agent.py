@@ -20,7 +20,7 @@ from datetime import datetime
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
 device
-
+print(device)
 
 
 
@@ -1117,7 +1117,7 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
     
         
     # np.savez(f"{args.MODEL_SAVE_FOLDER}/all_produced_trajectories", all_produced_trajectories)
-    if steps % 50_000:
+    if steps % 50_000 == 0:
         plt.savefig(f"{LOGS_FOLDER}/benchmark-steps:{steps}.png")
         plt.close()
     
@@ -1171,7 +1171,7 @@ rewards_logs = np.zeros((len(benchmarks), 0),)
 
 
 
-for step in tqdm(range(500_000)):
+for step in tqdm(range(2_000_000)):
 
     obs, action, next_obs, _ = get_iql_training_data(dataset, batch_size=1024)
 
