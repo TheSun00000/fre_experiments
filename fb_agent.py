@@ -531,7 +531,7 @@ class FBDDPGAgentConfig:
     rand_weight: bool = False  # True, False
     preprocess: bool = True
     norm_z: bool = True
-    q_loss: bool = False
+    q_loss: bool = True
     q_loss_coef: float = 0.01
     additional_metric: bool = False
     add_trunk: bool = False
@@ -699,7 +699,7 @@ class FBDDPGAgent(nn.Module):
                 cov = torch.matmul(B.T, B) / B.shape[0]
                 inv_cov = torch.inverse(cov)
                 implicit_reward = (torch.matmul(B, inv_cov) * z).sum(dim=1)  # batch_size
-                target_Q = implicit_reward.detach() + discount.squeeze(1) * next_Q  # batch_size
+                target_Q = implicit_reward.detach() + discount * next_Q  # batch_size
             Q1, Q2 = [torch.einsum('sd, sd -> s', Fi, z) for Fi in [F1, F2]]
             q_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
             fb_loss += self.cfg.q_loss_coef * q_loss
