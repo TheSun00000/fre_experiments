@@ -1171,7 +1171,7 @@ def run_test_antmaze(env, agent, benchmarks, benchmark_id, num_evals):
     
         produced_trajectory = []    
 
-        for step in tqdm(range(2000)):
+        for step in range(2000):
             
             produced_trajectory.append(state)
             
@@ -1328,7 +1328,7 @@ for step in tqdm(range(2_000_000)):
     
     
     
-    if step % 5_000 == 0:
+    if step % 50_000 == 0:
     
         benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=5, steps=step)
         

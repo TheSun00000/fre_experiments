@@ -44,7 +44,7 @@ KEEP_ONLY_COORDS = False
 now = datetime.now()
 date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
 
-exp_name = f'FB-{ENV_NAME}'
+exp_name = f'FB_FRE-{ENV_NAME}'
     
 LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
 MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
@@ -991,7 +991,8 @@ class FBDDPGAgent(nn.Module):
 
 
 fb_agent = FBDDPGAgent()
-fb_agent.load_state_dict(torch.load('shared_models/fb_agent_cheetah.pth'))
+# fb_agent.load_state_dict(torch.load('shared_models/fb_agent_cheetah.pth'))
+fb_agent.load_state_dict(torch.load('models/2025-10-12_17-43-23_FB-cheetah/fb_agent.pth'))
 
 
 ##############################################################################################################V
@@ -1095,20 +1096,21 @@ class PositionalEncoding(nn.Module):
 ##############################################################################################################V
 
 
-primal_zs = fb_agent.sample_z(100, device)
+# primal_zs = fb_agent.sample_z(100, device)
 
-trajectories_idx = torch.randint(0, num_trajectories, (64*(128+128),))
-states_idx = torch.randint(0, len_trajectory, (64*(128+128),))
+
 
 def sample_reward_function_fre(batch_size, num_random_samples):
 
     # batch_size, num_random_samples = 16, 200
 
-    # z = fb_agent.sample_z(size=batch_size, device=device)
+    z = fb_agent.sample_z(size=batch_size, device=device)
     # z = primal_z.repeat(batch_size, 1)
-    z = primal_zs[torch.randint(0, primal_zs.shape[0], (batch_size,))]
+    # z = primal_zs[torch.randint(0, primal_zs.shape[0], (batch_size,))]
 
-    
+    trajectories_idx = torch.randint(0, num_trajectories, (batch_size*num_random_samples,))
+    states_idx = torch.randint(0, len_trajectory, (batch_size*num_random_samples,))
+
     random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
     random_states = random_states.reshape(batch_size, num_random_samples, STATE_DIM).to(device)
     
@@ -1122,6 +1124,8 @@ def sample_reward_function_fre(batch_size, num_random_samples):
         z=z,
         expectation_nb=10_000
     )
+    random_states_rewards = random_states_rewards / 20
+    random_states_rewards = torch.clip(random_states_rewards, -1, 1)
 
     
     return reward_params, random_states, random_states_rewards, random_states_aux
@@ -1170,7 +1174,7 @@ class FRENetwork(nn.Module):
     def get_transformer_encoding(self, reward_state_pairs):
         reward_states = reward_state_pairs[:, :, :-1]
         reward_values = reward_state_pairs[:, :, -1]
-        reward_values = reward_values / 50
+        # reward_values = reward_values / 50
         reward_values_idx = torch.floor((reward_values / 2.0 + 0.5) * self.num_discrete_embeddings).int()
         reward_values_idx = torch.clip(reward_values_idx, 0, self.num_discrete_embeddings - 1)
 
@@ -1278,7 +1282,7 @@ kl_losses = []
 num_encode_states = 128
 num_decode_states = 128
 
-for i in tqdm(range(10_000)):
+for i in tqdm(range(1_000_000)):
     
     reward_params, random_states, random_states_rewards, random_states_aux = sample_reward_function_fre(batch_size=64, num_random_samples=(num_encode_states+num_decode_states))
     
@@ -1323,7 +1327,7 @@ for i in tqdm(range(10_000)):
         fig, axs = plt.subplots(1, 2, figsize=(10, 4))
         axs[0].plot(reward_losses)
         # axs[0].set_xscale('log')
-        # axs[0].set_ylim(0, 100.0)
+        axs[0].set_ylim(0, 1.0)
         axs[1].plot(kl_losses)
         # plt.show()
         plt.savefig(f"{LOGS_FOLDER}/loss.png")

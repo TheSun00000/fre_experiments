@@ -993,8 +993,8 @@ class FBDDPGAgent(nn.Module):
 
 
 fb_agent = FBDDPGAgent()
-fb_agent.load_state_dict(torch.load('shared_models/fb_agent_cheetah.pth'))
-# fb_agent.load_state_dict(torch.load('models/2025-10-12_17-43-23_FB-cheetah/fb_agent.pth'))
+# fb_agent.load_state_dict(torch.load('shared_models/fb_agent_cheetah.pth'))
+fb_agent.load_state_dict(torch.load('models/2025-10-12_17-43-23_FB-cheetah/fb_agent.pth'))
         
 
 ##############################################################################################################V
@@ -1165,7 +1165,7 @@ def get_reward(reward_params, random_states):
         expectation_nb=10_000
     )
     random_states_rewards = random_states_rewards / 40
-    random_states_rewards = torch.clip(random_states_rewards, -1, 1)
+    # random_states_rewards = torch.clip(random_states_rewards, -1, 1)
 
     return random_states_rewards
 
@@ -1307,6 +1307,7 @@ def run_benchmark(env, dataset: Dataset, iql_agent, benchmarks, steps, num_evals
                 torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
                 c='red', s=1
             )
+            axs[benchmark_id, 2].set_xlim([-25, 25])
         elif ENV_NAME == 'walker':
             axs[benchmark_id, 0].scatter(eval_obs[..., 16], eval_obs[..., 24], c=real_eval_rewards)
             axs[benchmark_id, 1].scatter(eval_obs[..., 16], eval_obs[..., 24], c=eval_rewards)
@@ -1426,7 +1427,7 @@ for timestep in tqdm(range(iql_training_steps+1)):
     )
     
     with torch.no_grad():
-        batch['rewards'] = get_reward(reward_params, random_states=batch['states']).unsqueeze(-1)
+        batch['rewards'] = get_reward(reward_params, random_states=batch['next_states']).unsqueeze(-1)
 
     # Implicit Q-Learning
 
