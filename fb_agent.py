@@ -24,12 +24,7 @@ print(device)
 
 
 
-ENV_NAME = 'cheetah' # cheetah | walker
-
-
-
-NUM_TRAJECTORIES = 10000
-TRAJECTORY_LEN = 1000
+ENV_NAME = 'antmaze' # cheetah | walker | antmaze
 
 
 
@@ -61,6 +56,8 @@ from dm_control import suite
 if ENV_NAME == 'cheetah':
     STATE_DIM = 17
     ACTION_DIM = 6
+    NUM_TRAJECTORIES = 10000
+    TRAJECTORY_LEN = 1000
     # AUX_DIM = 1
     env = suite.load(
         domain_name='cheetah',
@@ -76,9 +73,11 @@ if ENV_NAME == 'cheetah':
     ), axis=-1)
     # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 1)), axis=-1)
     
-else:
+elif ENV_NAME == 'walker':
     STATE_DIM = 24
     ACTION_DIM = 6
+    NUM_TRAJECTORIES = 10000
+    TRAJECTORY_LEN = 1000
     # AUX_DIM = 3
     env = suite.load(
         domain_name='walker',
@@ -94,7 +93,15 @@ else:
     ), axis=-1)
     # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
 
-
+elif ENV_NAME == 'antmaze':
+    import gym
+    import d4rl
+    STATE_DIM = 29
+    ACTION_DIM = 8
+    NUM_TRAJECTORIES = 999
+    TRAJECTORY_LEN = 1001
+    env = gym.make('antmaze-large-diverse-v2')
+    dataset = env.get_dataset()
 
 
 dataset_trajectories = torch.tensor(dataset['observations']).float()
@@ -106,8 +113,12 @@ dataset_terminals = torch.tensor(dataset['terminals']).float()
 dataset_timeouts = torch.zeros(NUM_TRAJECTORIES, TRAJECTORY_LEN).bool()
 dataset_timeouts[:, -1] = True
 
-dataset_goals = torch.tensor(dataset['infos/goal']).float()
-
+if ENV_NAME == 'antmaze':
+    N = NUM_TRAJECTORIES * TRAJECTORY_LEN
+    dataset_trajectories = dataset_trajectories[:N]
+    dataset_actions = dataset_actions[:N]
+    dataset_terminals = dataset_terminals[:N]
+    dataset_timeouts = dataset_timeouts[:N]
 
 
 dataset_trajectories = dataset_trajectories.reshape(-1, TRAJECTORY_LEN, STATE_DIM)
@@ -115,6 +126,8 @@ dataset_actions = dataset_actions.reshape(-1, TRAJECTORY_LEN, ACTION_DIM)
 dataset_terminals = dataset_terminals
 dataset_timeouts = dataset_timeouts.reshape(-1, TRAJECTORY_LEN)
 
+if ENV_NAME == 'antmaze':
+    aux = dataset_trajectories.numpy()
 
 num_trajectories, len_trajectory, obs_dim = dataset_trajectories.shape
 
@@ -266,7 +279,7 @@ if ENV_NAME == 'cheetah':
         (velocity_reward_function.compute_reward, 'vel10', 10),
         (velocity_reward_function.compute_reward, 'flip', 'flip'),
     ]
-else:
+elif ENV_NAME == 'walker':
     velocity_reward_function = VelocityRewardFunctionWalker()
     benchmarks = [
         (velocity_reward_function.compute_reward, 'vel0.1', 0.1),
@@ -274,6 +287,29 @@ else:
         (velocity_reward_function.compute_reward, 'vel4', 4),
         (velocity_reward_function.compute_reward, 'vel8', 8),
         (velocity_reward_function.compute_reward, 'flip', 'flip'),
+    ]
+elif ENV_NAME == 'antmaze':
+    from utils.antmaze_benchmark import VelocityRewardFunction, SimplexRewardFunction, TestRewPath, TestRewLoop, TestRewMatrixEdges, goal_reaching_reward
+    velocity_reward_function = VelocityRewardFunction()
+    simplex_reward_function = SimplexRewardFunction(num_simplex=10)
+    benchmarks = [
+        (goal_reaching_reward, 'goal_bottom', np.array([28, 0])),
+        (goal_reaching_reward, 'goal_left', np.array([0, 15])),
+        (goal_reaching_reward, 'goal_top', np.array([35, 24])),
+        (goal_reaching_reward, 'goal_center', np.array([12, 24])), 
+        (goal_reaching_reward, 'goal_right', np.array([33, 16])),
+        (velocity_reward_function.compute_reward, 'vel_left', [-1, 0]),
+        (velocity_reward_function.compute_reward, 'vel_up', [0, 1]),
+        (velocity_reward_function.compute_reward, 'vel_down', [0, -1]),
+        (velocity_reward_function.compute_reward, 'vel_right', [1, 0]),
+        (simplex_reward_function.compute_reward, 'simplex_1', 1),
+        (simplex_reward_function.compute_reward, 'simplex_2', 2),
+        (simplex_reward_function.compute_reward, 'simplex_3', 3),
+        (simplex_reward_function.compute_reward, 'simplex_4', 4),
+        (simplex_reward_function.compute_reward, 'simplex_5', 5),
+        (TestRewPath().compute_reward, 'path_center', None),
+        (TestRewLoop().compute_reward, 'path_loop', None),
+        (TestRewMatrixEdges().compute_reward, 'path_edges', None)
     ]
 
 
@@ -598,8 +634,8 @@ class FBDDPGAgent(nn.Module):
         cfg = FBDDPGAgentConfig(**kwargs)
         self.cfg = cfg
         
-        self.obs_dim = 17
-        self.action_dim = 6
+        self.obs_dim = STATE_DIM
+        self.action_dim = ACTION_DIM
         
         self.forward_net = ForwardMap(self.obs_dim, cfg.z_dim, self.action_dim,
             cfg.feature_dim, cfg.hidden_dim,
@@ -961,6 +997,44 @@ class FBDDPGAgent(nn.Module):
 
 
 
+import matplotlib.patches as patches
+
+
+def add_largest_maze_walls(ax):    
+
+    maze_optim = [
+        (1, 1, 1, 2),    
+        (0, 4, 2, 1),
+        (3, 1, 1, 4),
+        (5, 0, 1, 1),
+        (4, 2, 3, 1),
+        (1, 6, 3, 1),
+        (4, 4, 2, 1),
+        (5, 6, 2, 1),
+        (1, 8, 1, 1),
+        (3, 7, 1, 2),
+        (5, 8, 1, 2)
+    ]
+
+    block_size = 0.025 * 80
+
+    height, width = 7, 10
+    torso_x, torso_y = (width - 1)*block_size, (height - 1)*block_size
+
+    rects = []
+    for i in range(len(maze_optim)):
+        (y, x, w, h) = maze_optim[i]
+            
+        x = x * block_size * 2 - torso_x + (h - 1) * block_size - h * block_size + 18
+        y = y * block_size * 2 - torso_y + (w - 1) * block_size - w * block_size + 12
+        h, w = h * block_size * 2, w * block_size * 2
+        w = w * 1.
+        y = y * 1.
+        rect = patches.Rectangle((x, y), h, w, linewidth=2, edgecolor='gray', facecolor='gray')
+
+        ax.add_patch(rect)
+        
+  
 
 
 
@@ -1060,6 +1134,74 @@ def run_test_dmc(env, agent, benchmarks, benchmark_id, num_evals):
 
 
 
+def reset_to_location_antmaze(env, location):
+    env.sim.reset()
+    qpos = env.init_qpos + env.np_random.uniform(low=-.1, high=.1, size=env.model.nq)
+    qpos[:2] = np.array(location).astype(env.observation_space.dtype)
+    qvel = env.init_qvel + env.np_random.randn(env.model.nv) * .1
+    env.set_state(qpos, qvel)
+    return env.unwrapped._get_obs()
+
+
+def run_test_antmaze(env, agent, benchmarks, benchmark_id, num_evals):
+
+
+    benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
+
+    produced_trajectories = []
+    
+    for _ in range(num_evals):
+
+        # _, encode_obs, _ = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
+        nb_eval_samples = 10000
+        eval_obs, _, _, eval_aux = get_iql_training_data(dataset, batch_size=nb_eval_samples)
+        benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
+        eval_reward = benchmark_reward_function(eval_aux, benchmark_param).to(device).float()
+        meta = agent.infer_meta_from_obs_and_rewards(eval_obs, eval_reward)
+            
+            
+            
+        env.reset()
+        location = (20, 15)
+        start_state = reset_to_location_antmaze(env, location)
+        state = start_state
+
+        tensor_state = torch.tensor(state).reshape(1, -1).to(device).float() 
+    
+    
+        produced_trajectory = []    
+
+        for step in tqdm(range(2000)):
+            
+            produced_trajectory.append(state)
+            
+            with torch.no_grad():
+                tensor_state = torch.tensor(state).reshape(-1).to(device).float()
+                # dist = iql_agent.get_actor(w_mean, tensor_state)
+                # action = dist.loc.cpu()
+                # action = np.array(action[0]).clip(-1, 1)
+                
+                # action = iql_agent.get_actor(w_mean, tensor_state).mean.cpu().numpy().reshape(-1)
+                action = agent.act(tensor_state, meta, eval_mode=True, step=0)
+                
+
+            new_state, _, _, _ = env.step(action)
+            
+            state = new_state
+            
+        produced_trajectory = np.stack(produced_trajectory)
+        produced_trajectories.append(produced_trajectory)
+    
+    produced_trajectories = np.stack(produced_trajectories)
+
+    return produced_trajectories, None, meta
+
+
+
+
+
+
+
 
 def run_benchmark(env, agent, benchmarks, num_evals, steps):
     fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
@@ -1073,16 +1215,13 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
         print(benchmark_test_label)
         
         if ENV_NAME in ['cheetah', 'walker']:
-            
             produced_trajectory, produced_trajectory_physics, meta = run_test_dmc(
                 env, agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals
             )
-            
-            if ENV_NAME == 'cheetah':
-                produced_trajectory_aux = produced_trajectory[..., -2:]
-            elif ENV_NAME == 'walker':
-                produced_trajectory_aux = produced_trajectory[..., -4:]
-                
+        elif ENV_NAME in ['antmaze']:
+            produced_trajectory, produced_trajectory_physics, meta = run_test_antmaze(
+                env, agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals
+            )
 
         
         eval_obs, _, _, eval_aux = get_iql_training_data(dataset, batch_size=10_000)
@@ -1107,6 +1246,13 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
                 torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
                 c='red', s=1
             )
+        elif ENV_NAME == 'antmaze':
+            axs[benchmark_id, 0].scatter(eval_obs[..., 0], eval_obs[..., 1], c=real_eval_rewards)
+            axs[benchmark_id, 1].scatter(eval_obs[..., 0], eval_obs[..., 1], c=eval_rewards)
+            axs[benchmark_id, 2].scatter(produced_trajectory[..., 0], produced_trajectory[..., 1], c='red', s=5)
+            add_largest_maze_walls(axs[benchmark_id, 0])
+            add_largest_maze_walls(axs[benchmark_id, 1])
+            add_largest_maze_walls(axs[benchmark_id, 2])
 
             
         axs[benchmark_id, 0].set_title(f'{benchmark_test_label}')
@@ -1135,7 +1281,9 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
             trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -2:]).reshape(1, -1, 2)
         elif ENV_NAME == 'walker':
             trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -4:]).reshape(1, -1, 4) 
-            
+        elif ENV_NAME == 'antmaze':
+            trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ...]).reshape(1, -1, STATE_DIM) 
+
         trajectory_states_rewards = benchmark_reward_function(trajectory_states_aux, benchmark_param).float()
         trajectory_states_rewards = trajectory_states_rewards.reshape(
             all_produced_trajectories.shape[1],
