@@ -1326,11 +1326,12 @@ for step in tqdm(range(2_000_000)):
     fb_agent.update(obs, action, next_obs, step=step)
     
     
-    
+    if step % 5_000 == 0:
+        torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
     
     if step % 50_000 == 0:
     
-        benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=5, steps=step)
+        benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=1, steps=step)
         
         rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
         # print(rewards_logs)
@@ -1348,7 +1349,7 @@ for step in tqdm(range(2_000_000)):
         plt.close()
         
                     
-        torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent.pth")
+        torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
     
     # break
 
