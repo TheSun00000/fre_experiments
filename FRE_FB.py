@@ -28,7 +28,7 @@ device
 ##############################################################################################################V
 
 
-ENV_NAME = 'cheetah' # cheetah | walker
+ENV_NAME = 'antmaze' # antmaze | cheetah | walker
 
 
 ##############################################################################################################V
@@ -83,7 +83,7 @@ if ENV_NAME == 'cheetah':
     ), axis=-1)
     # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 1)), axis=-1)
     
-else:
+elif ENV_NAME == 'walker':
     STATE_DIM = 24
     ACTION_DIM = 6
     # AUX_DIM = 3
@@ -101,6 +101,15 @@ else:
     ), axis=-1)
     # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
 
+elif ENV_NAME == 'antmaze':
+    import gym
+    import d4rl
+    STATE_DIM = 29
+    ACTION_DIM = 8
+    NUM_TRAJECTORIES = 999
+    TRAJECTORY_LEN = 1001
+    env = gym.make('antmaze-large-diverse-v2')
+    dataset = env.get_dataset()
 
 ##############################################################################################################V
 
@@ -115,6 +124,13 @@ dataset_timeouts = torch.zeros(NUM_TRAJECTORIES, TRAJECTORY_LEN).bool()
 dataset_timeouts[:, -1] = True
 
 dataset_goals = torch.tensor(dataset['infos/goal']).float()
+
+if ENV_NAME == 'antmaze':
+    N = NUM_TRAJECTORIES * TRAJECTORY_LEN
+    dataset_trajectories = dataset_trajectories[:N]
+    dataset_actions = dataset_actions[:N]
+    dataset_terminals = dataset_terminals[:N]
+    dataset_timeouts = dataset_timeouts[:N]
 
 
 
@@ -318,8 +334,11 @@ def get_iql_training_data_FB(dataset:Dataset, batch_size):
     next_states = dataset.trajectories[trajectory_idx, state_idx+1].reshape(batch_size, obs_dim)
     actions = dataset.actions[trajectory_idx, state_idx].reshape(batch_size, -1)
     
-    aux_ = aux[trajectory_idx, state_idx].reshape(batch_size, -1)
-    aux_ = torch.tensor(aux_)
+    if ENV_NAME == 'antmaze':
+        aux_ = None
+    else:
+        aux_ = aux[trajectory_idx, state_idx].reshape(batch_size, -1)
+        aux_ = torch.tensor(aux_)
     
     # return {
     #     'states': states.to(device),
@@ -611,8 +630,8 @@ class FBDDPGAgent(nn.Module):
         cfg = FBDDPGAgentConfig(**kwargs)
         self.cfg = cfg
         
-        self.obs_dim = 17
-        self.action_dim = 6
+        self.obs_dim = STATE_DIM
+        self.action_dim = ACTION_DIM
         
         self.forward_net = ForwardMap(self.obs_dim, cfg.z_dim, self.action_dim,
             cfg.feature_dim, cfg.hidden_dim,
@@ -819,13 +838,14 @@ class FBDDPGAgent(nn.Module):
             # print(B_obs)
             
             # expectation_obs, _, _, _ = get_iql_training_data_FB(dataset, batch_size=2048)
-            B = self.backward_net(self.expectation_obs)
+            # B = self.backward_net(self.expectation_obs)
             # B = self.backward_net(expectation_obs)
 
-            cov = torch.matmul(B.T, B) / B.shape[0]
-            inv_cov = torch.inverse(cov)
+            # cov = torch.matmul(B.T, B) / B.shape[0]
+            # inv_cov = torch.inverse(cov)
             
-            B_obs_inv_cov = torch.matmul(B_obs, inv_cov)
+            # B_obs_inv_cov = torch.matmul(B_obs, inv_cov)
+            B_obs_inv_cov = B_obs
             # implicit_reward = (B_obs_inv_cov * z).sum(dim=1)
             # implicit_reward = torch.einsum('bnd, bd -> bn', B_obs_inv_cov, z)
             # print(B_obs.shape, inv_cov.shape, B_obs_inv_cov.shape)
@@ -992,7 +1012,8 @@ class FBDDPGAgent(nn.Module):
 
 fb_agent = FBDDPGAgent()
 # fb_agent.load_state_dict(torch.load('shared_models/fb_agent_cheetah.pth'))
-fb_agent.load_state_dict(torch.load('models/2025-10-12_17-43-23_FB-cheetah/fb_agent.pth'))
+fb_agent.load_state_dict(torch.load('shared_models/fb_agent_antmaze_step:2000000.pth'))
+# fb_agent.load_state_dict(torch.load('models/2025-10-12_17-43-23_FB-cheetah/fb_agent.pth'))
 
 
 ##############################################################################################################V
@@ -1100,29 +1121,33 @@ class PositionalEncoding(nn.Module):
 
 
 
-def sample_reward_function_fre(batch_size, num_random_samples):
+def sample_reward_function_fb(fb_agent, batch_size, num_random_samples):
 
     # batch_size, num_random_samples = 16, 200
 
     z = fb_agent.sample_z(size=batch_size, device=device)
     # z = primal_z.repeat(batch_size, 1)
     # z = primal_zs[torch.randint(0, primal_zs.shape[0], (batch_size,))]
-
+    
     trajectories_idx = torch.randint(0, num_trajectories, (batch_size*num_random_samples,))
     states_idx = torch.randint(0, len_trajectory, (batch_size*num_random_samples,))
 
+    
     random_states = dataset_trajectories[trajectories_idx, states_idx] # get the random states
     random_states = random_states.reshape(batch_size, num_random_samples, STATE_DIM).to(device)
     
-    random_states_aux = torch.tensor(aux[trajectories_idx, states_idx])
-    random_states_aux = random_states_aux.reshape(batch_size, num_random_samples, -1)
+    if ENV_NAME != 'antmaze':
+        random_states_aux = torch.tensor(aux[trajectories_idx, states_idx])
+        random_states_aux = random_states_aux.reshape(batch_size, num_random_samples, -1)
+    else:
+        random_states_aux = None
 
     reward_params = z
 
     random_states_rewards = fb_agent.get_implicit_reward(
         obs=random_states,
         z=z,
-        expectation_nb=10_000
+        expectation_nb=1_000
     )
     random_states_rewards = random_states_rewards / 20
     random_states_rewards = torch.clip(random_states_rewards, -1, 1)
@@ -1284,7 +1309,7 @@ num_decode_states = 128
 
 for i in tqdm(range(1_000_000)):
     
-    reward_params, random_states, random_states_rewards, random_states_aux = sample_reward_function_fre(batch_size=64, num_random_samples=(num_encode_states+num_decode_states))
+    reward_params, random_states, random_states_rewards, random_states_aux = sample_reward_function_fb(fb_agent, batch_size=64, num_random_samples=(num_encode_states+num_decode_states))
     
     # reward_params, random_states, random_states_rewards, mask = sample_reward_function_fre_RG(batch_size=256, num_random_samples=(num_encode_states+num_decode_states))
     
@@ -1322,7 +1347,7 @@ for i in tqdm(range(1_000_000)):
     
     # break
     
-    if i % 20 == 0:
+    if i % 200 == 0:
         clear_output(True)
         fig, axs = plt.subplots(1, 2, figsize=(10, 4))
         axs[0].plot(reward_losses)
