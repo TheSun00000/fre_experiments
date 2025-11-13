@@ -24,7 +24,7 @@ print(device)
 
 
 
-ENV_NAME = 'antmaze' # cheetah | walker | antmaze
+ENV_NAME = 'cheetah' # cheetah | walker | antmaze
 
 
 
@@ -847,32 +847,38 @@ class FBDDPGAgent(nn.Module):
         if not z.shape[-1] == self.cfg.z_dim:
             raise RuntimeError("There's something wrong with the logic here")
 
+        backward_input = obs
+        # future_goal = batch.future_obs
+        # if self.cfg.goal_space is not None:
+        #     assert batch.goal is not None
+        #     backward_input = batch.goal
+        #     future_goal = batch.future_goal
 
-        # perm = torch.randperm(self.cfg.batch_size)
-        # backward_input = backward_input[perm]
+        perm = torch.randperm(self.cfg.batch_size)
+        backward_input = backward_input[perm]
 
-        # if self.cfg.mix_ratio > 0:
-        #     mix_idxs: tp.Any = np.where(np.random.uniform(size=self.cfg.batch_size) < self.cfg.mix_ratio)[0]
-        #     if not self.cfg.rand_weight:
-        #         with torch.no_grad():
-        #             mix_z = self.backward_net(backward_input[mix_idxs]).detach()
-        #     else:
-        #         # generate random weight
-        #         weight = torch.rand(size=(mix_idxs.shape[0], self.cfg.batch_size)).to(self.device)
-        #         weight = F.normalize(weight, dim=1)
-        #         uniform_rdv = torch.rand(mix_idxs.shape[0], 1).to(self.device)
-        #         weight = uniform_rdv * weight
-        #         with torch.no_grad():
-        #             mix_z = torch.matmul(weight, self.backward_net(backward_input).detach())
-        #     if self.cfg.norm_z:
-        #         mix_z = math.sqrt(self.cfg.z_dim) * F.normalize(mix_z, dim=1)
-        #     z[mix_idxs] = mix_z
+        if self.cfg.mix_ratio > 0:
+            mix_idxs: tp.Any = np.where(np.random.uniform(size=self.cfg.batch_size) < self.cfg.mix_ratio)[0]
+            if not self.cfg.rand_weight:
+                with torch.no_grad():
+                    mix_z = self.backward_net(backward_input[mix_idxs]).detach()
+            else:
+                # generate random weight
+                weight = torch.rand(size=(mix_idxs.shape[0], self.cfg.batch_size)).to(self.device)
+                weight = F.normalize(weight, dim=1)
+                uniform_rdv = torch.rand(mix_idxs.shape[0], 1).to(self.device)
+                weight = uniform_rdv * weight
+                with torch.no_grad():
+                    mix_z = torch.matmul(weight, self.backward_net(backward_input).detach())
+            if self.cfg.norm_z:
+                mix_z = math.sqrt(self.cfg.z_dim) * F.normalize(mix_z, dim=1)
+            z[mix_idxs] = mix_z
 
         # hindsight replay
         # if self.cfg.future_ratio > 0:
-            # assert future_goal is not None
-            # future_idxs = np.where(np.random.uniform(size=self.cfg.batch_size) < self.cfg.future_ratio)
-            # z[future_idxs] = self.backward_net(future_goal[future_idxs]).detach()
+        #     assert future_goal is not None
+        #     future_idxs = np.where(np.random.uniform(size=self.cfg.batch_size) < self.cfg.future_ratio)
+        #     z[future_idxs] = self.backward_net(future_goal[future_idxs]).detach()
 
         metrics.update(self.update_fb(obs=obs, action=action, discount=discount,
                                       next_obs=next_obs, next_goal=next_obs, z=z, step=step))
@@ -1319,37 +1325,37 @@ rewards_logs = np.zeros((len(benchmarks), 0),)
 
 
 
-for step in tqdm(range(2_000_000)):
+for step in tqdm(range(5_000)):
 
     obs, action, next_obs, _ = get_iql_training_data(dataset, batch_size=1024)
 
     fb_agent.update(obs, action, next_obs, step=step)
     
     
-    if step % 5_000 == 0:
+    if step % 50 == 0:
         torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
     
-    if step % 50_000 == 0:
+    # if step % 50_000 == 0:
     
-        benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=1, steps=step)
+    #     benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=1, steps=step)
         
-        rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
-        # print(rewards_logs)
-        num_cols = 4
-        num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
-        fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
-        axs = axs.flatten()
+    #     rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
+    #     # print(rewards_logs)
+    #     num_cols = 4
+    #     num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
+    #     fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
+    #     axs = axs.flatten()
         
-        for i in range(len(benchmarks)):
-            _, benchmark_test_label, _ = benchmarks[i]
-            axs[i].plot(rewards_logs[i])
-            axs[i].set_title(benchmark_test_label)
+    #     for i in range(len(benchmarks)):
+    #         _, benchmark_test_label, _ = benchmarks[i]
+    #         axs[i].plot(rewards_logs[i])
+    #         axs[i].set_title(benchmark_test_label)
     
-        plt.savefig(f"{LOGS_FOLDER}/rewards.png")
-        plt.close()
+    #     plt.savefig(f"{LOGS_FOLDER}/rewards.png")
+    #     plt.close()
         
                     
-        torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
+    #     torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
     
     # break
 
