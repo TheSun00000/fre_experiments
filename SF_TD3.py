@@ -128,7 +128,7 @@ if __name__ == "__main__":
     if 'sf_agent_checkpoint' in kwargs:
         sf_agent_checkpoint = kwargs['sf_agent_checkpoint']
     else:
-        sf_agent_checkpoint = f"shared_models/sf_models/{SF_METHOD}.pth"
+        sf_agent_checkpoint = f"shared_models/sf_models/{ENV_NAME}/{SF_METHOD}.pth"
 
     ################################################################################################################################
 
@@ -158,6 +158,8 @@ if __name__ == "__main__":
 
     print('LOGS_FOLDER:', LOGS_FOLDER)
     print('MODEL_SAVE_FOLDER:', MODEL_SAVE_FOLDER)
+
+    save_self_copy(dst_dir=LOGS_FOLDER)
 
 
     ################################################################################################################################
@@ -278,7 +280,7 @@ if __name__ == "__main__":
     if ENV_NAME == 'walker':
         velocity_reward_function = VelocityRewardFunctionWalker()
         benchmarks = [
-            (velocity_reward_function.compute_reward, 'vel0.1', 0.1),
+            (velocity_reward_function.compute_reward, 'vel0', 0.0),
             (velocity_reward_function.compute_reward, 'vel1', 1),
             (velocity_reward_function.compute_reward, 'vel4', 4),
             (velocity_reward_function.compute_reward, 'vel8', 8),
@@ -488,8 +490,8 @@ if __name__ == "__main__":
                 )
                 axs[benchmark_id, 2].set_xlim([-25, 25])
             elif ENV_NAME == 'walker':
-                axs[benchmark_id, 0].scatter(eval_obs[..., 16], eval_obs[..., 24], c=real_eval_rewards)
-                axs[benchmark_id, 1].scatter(eval_obs[..., 16], eval_obs[..., 24], c=eval_rewards)
+                axs[benchmark_id, 0].scatter(eval_obs[..., 16], eval_aux[..., 0], c=real_eval_rewards)
+                axs[benchmark_id, 1].scatter(eval_obs[..., 16], eval_aux[..., 0], c=eval_rewards)
                 axs[benchmark_id, 2].scatter(
                     produced_trajectory_physics[..., 1],
                     torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
@@ -731,7 +733,7 @@ if __name__ == "__main__":
         g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
         sf_loss_function = LRA_SF_loss
     elif SF_METHOD == 'fb':
-        f_input_dim, f_output_dim = [STATE_DIM, Z_DIM] 
+        f_input_dim, f_output_dim = [STATE_DIM + ACTION_DIM, Z_DIM] 
         g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
         hidden_dim = 526
 
@@ -742,20 +744,67 @@ if __name__ == "__main__":
         hidden_dim=hidden_dim
     ).to(device)
 
-    if SF_METHOD == 'lra_sf':
-        # sf_agent.load_state_dict(torch.load('shared_models/sf_lra_sf.pth'))
+    if sf_agent_checkpoint != 'new':
+        # if os.path.exists(sf_agent_checkpoint):
         sf_agent.load_state_dict(torch.load(sf_agent_checkpoint))
+    else:
+        
+        losses = []
+        
+        for steps in tqdm(range(100_000), desc='SF agent training'):
+        
+            # break
+            
+            obs, action, next_obs, timeout, _ = get_iql_training_data(dataset, batch_size=1024)
+            # random_obs = next_obs[torch.randperm(next_obs.shape[0])]
+            
+            loss = sf_loss_function(sf_agent, obs, action, next_obs)
+            
+            sf_agent.optimizer.zero_grad()
+            loss.backward()
+            sf_agent.optimizer.step()
+            
+            soft_update_params(sf_agent.f, sf_agent.target_f, tau=0.01)
+            soft_update_params(sf_agent.g, sf_agent.target_g, tau=0.01)
+            
+            losses.append(loss.item())
+            
+            
+            if steps % 1000 == 0:
+                clear_output(True)
+                fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+                axs[0].plot(losses)
+                axs[1].plot(losses)
+                axs[1].set_ylim([0, 1])
+                axs[2].plot(losses)
+                axs[2].set_ylim([0, 0.1])
+                plt.savefig(f'{LOGS_FOLDER}/sf_training_losses.png')
+
+            if steps % 1000 == 0:
+                torch.save(sf_agent.state_dict(), f'{MODEL_SAVE_FOLDER}/{ENV_NAME}_{SF_METHOD}.pth')
+    
+        torch.save(sf_agent.state_dict(), f'{MODEL_SAVE_FOLDER}/{ENV_NAME}_{SF_METHOD}.pth')
+    
+    
+    
+    
+    
+    # if SF_METHOD == 'lra_sf':
+    #     # sf_agent.load_state_dict(torch.load('shared_models/sf_lra_sf.pth'))
+    #     sf_agent.load_state_dict(torch.load(sf_agent_checkpoint))
         
 
-    elif SF_METHOD == 'fb':
-        # d = torch.load('shared_models/fb_agent_cheetah.pth')
-        d = torch.load(sf_agent_checkpoint)
-        new_d = {}
-        for layer in d:
-            if "backward_net." in layer:
-                new_layer = '.'.join(layer.split('.')[-2:])
-                new_d[new_layer] = d[layer]
-        sf_agent.g.load_state_dict(new_d)
+    # elif SF_METHOD == 'fb':
+    #     print(sf_agent_checkpoint)
+    #     # d = torch.load('shared_models/fb_agent_cheetah.pth')
+    #     sf_agent.g.load_state_dict(new_d)
+    #     # d = torch.load(sf_agent_checkpoint)
+    #     # new_d = {}
+    #     # for layer in d:
+    #     #     if "backward_net." in layer:
+    #     #         new_layer = '.'.join(layer.split('.')[-2:])
+    #     #         new_d[new_layer] = d[layer]
+    #     # sf_agent.g.load_state_dict(new_d)
 
     # Training a policy:
 
@@ -938,13 +987,13 @@ if __name__ == "__main__":
 
 
 
-    benchmark_id = 3
-    eval_obs, _, _, _, eval_aux = get_iql_training_data(dataset, batch_size=10000)
-    benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
-    eval_reward = benchmark_reward_function(eval_aux, benchmark_param).to(device)
+    # benchmark_id = 2
+    # eval_obs, _, _, _, eval_aux = get_iql_training_data(dataset, batch_size=10000)
+    # benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
+    # eval_reward = benchmark_reward_function(eval_aux, benchmark_param).to(device)
 
-    precomputed_test_z = sf_agent.g(eval_obs).T @ eval_reward
-    precomputed_test_z = F.normalize(precomputed_test_z, dim=-1)
+    # precomputed_test_z = sf_agent.g(eval_obs).T @ eval_reward
+    # precomputed_test_z = F.normalize(precomputed_test_z, dim=-1)
 
 
 
@@ -982,14 +1031,14 @@ if __name__ == "__main__":
         # 3) Reconstructed reward function
         with torch.no_grad():
             # 1) Random reward functions
-            # reward = (sf_agent.g(obs) * z).sum(dim=-1).unsqueeze(-1)
+            reward = (sf_agent.g(obs) * z).sum(dim=-1).unsqueeze(-1)
             
             # 2) Test reward function
-            # benchmark_reward_function, _, benchmark_param = benchmarks[2]
+            # benchmark_reward_function, _, benchmark_param = benchmarks[3]
             # reward = benchmark_reward_function(obs_aux, benchmark_param).to(device).float().unsqueeze(-1)
             
             # 3) Reconstructed reward function
-            reward = (sf_agent.g(obs) * precomputed_test_z).sum(dim=-1).unsqueeze(-1)
+            # reward = (sf_agent.g(obs) * precomputed_test_z).sum(dim=-1).unsqueeze(-1)
             
         
         # exit()
@@ -1050,7 +1099,7 @@ if __name__ == "__main__":
         soft_update_params(agent.successor_net, agent.target_successor_net, tau=0.005)
 
         
-        if steps % 10 == 0:
+        if steps % 10_000 == 0:
             clear_output(True)
             benchmark_rewards = run_benchmark(env, agent, benchmarks, 1)
             
@@ -1069,7 +1118,9 @@ if __name__ == "__main__":
             plt.savefig(f"{LOGS_FOLDER}/rewards.png")
             plt.close()
             
-            add_text_to_file(LOGS_FILE, str(list(benchmark_rewards.round(4))))
+            add_text_to_file(LOGS_FILE, str(benchmark_rewards.round(4).tolist()))
+            
+            torch.save(agent.state_dict(), f"{MODEL_SAVE_FOLDER}/td3_agent.pth")
             
         
         # break
