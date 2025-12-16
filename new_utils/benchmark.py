@@ -95,6 +95,8 @@ class VelocityRewardFunctionWalker:
                                             value_at_margin=0.5,
                                             sigmoid='linear')
             # move_reward[params == 0] = stand_reward[params == 0]
+            if (params == 0).all(): # in the case of standing, ignore `move_reward`
+                move_reward = torch.full_like(move_reward, fill_value=1.0)
             
         
         else: # flip

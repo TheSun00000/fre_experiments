@@ -108,6 +108,7 @@ if __name__ == "__main__":
     python SF_TD3.py \
         env_name=cheetah \
         sf_method=lra_sf \
+        top_expressivity_percentage=1 \
         sf_agent_checkpoint=shared_models/sf_models/lra_sf.pth \
         suffix=test
         
@@ -130,11 +131,16 @@ if __name__ == "__main__":
     else:
         sf_agent_checkpoint = f"shared_models/sf_models/{ENV_NAME}/{SF_METHOD}.pth"
 
+    if 'top_expressivity_percentage' in kwargs:
+        TOP_EXPRESSIVITY_PERCENTAGE = kwargs['top_expressivity_percentage']
+    else:
+        TOP_EXPRESSIVITY_PERCENTAGE = 1.0
+        
     ################################################################################################################################
 
     USE_SF_Q = False
 
-    DEACTIVATE_Z_CONDITIONING = True
+    DEACTIVATE_Z_CONDITIONING = False
     TRAINING_STEPS = 1_000_000
 
     ################################################################################################################################
@@ -147,6 +153,8 @@ if __name__ == "__main__":
     exp_name = f'SF-TD3-{SF_METHOD}-{ENV_NAME}'
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
+    if TOP_EXPRESSIVITY_PERCENTAGE != 1:
+         exp_name = f'{exp_name}-topp={TOP_EXPRESSIVITY_PERCENTAGE}'
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
@@ -280,10 +288,10 @@ if __name__ == "__main__":
     if ENV_NAME == 'walker':
         velocity_reward_function = VelocityRewardFunctionWalker()
         benchmarks = [
-            (velocity_reward_function.compute_reward, 'vel0', 0.0),
+            (velocity_reward_function.compute_reward, 'stand', 0.0),
             (velocity_reward_function.compute_reward, 'vel1', 1),
-            (velocity_reward_function.compute_reward, 'vel4', 4),
-            (velocity_reward_function.compute_reward, 'vel8', 8),
+            (velocity_reward_function.compute_reward, 'walk', 4),
+            (velocity_reward_function.compute_reward, 'run', 10),
             (velocity_reward_function.compute_reward, 'flip', 'flip'),
         ]
     if ENV_NAME == 'antmaze':
@@ -785,28 +793,55 @@ if __name__ == "__main__":
     
         torch.save(sf_agent.state_dict(), f'{MODEL_SAVE_FOLDER}/{ENV_NAME}_{SF_METHOD}.pth')
     
+
     
     
-    
-    
-    # if SF_METHOD == 'lra_sf':
-    #     # sf_agent.load_state_dict(torch.load('shared_models/sf_lra_sf.pth'))
-    #     sf_agent.load_state_dict(torch.load(sf_agent_checkpoint))
+    if TOP_EXPRESSIVITY_PERCENTAGE != 1:
+        def signal2noise(r):
+            return r.mean(dim=-1).std(dim=-1) / r.std(dim=-1).mean(dim=-1)
+
+        expressivities = []
+        stored_zs = []
+
+        num_reward_functions = 1
+        num_states = 100000
+        observations, actions, next_observations, terminals, obs_aux = get_iql_training_data(dataset, batch_size=num_states)
+        observations = dataset.trajectories[::10, ::10].to(device).reshape(-1, STATE_DIM)
+        obs_aux = torch.tensor(aux[::10, ::10]).to(device).reshape(-1, aux.shape[-1])
+
+        with torch.no_grad():
+            sf_agent_g_observations = sf_agent.g(observations)
+
+
+        for _ in tqdm(range(10000)):
+            z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
+            z = F.normalize(z, dim=-1)
+            stored_zs.append(z.cpu())
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            with torch.no_grad():
+                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+                # all_rewards.append(rewards.reshape(1000, 100))
+                
+                cum_rewards = rewards.reshape(1000, 100).mean(dim=-1)
+                # expressivities.append(  skewness(cum_rewards).item()  )
+                # expressivities.append(  skewness(cum_rewards).item()  )
+                expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
+
+        expressivities = torch.tensor(expressivities)
+        stored_zs = torch.concat(stored_zs)
         
-
-    # elif SF_METHOD == 'fb':
-    #     print(sf_agent_checkpoint)
-    #     # d = torch.load('shared_models/fb_agent_cheetah.pth')
-    #     sf_agent.g.load_state_dict(new_d)
-    #     # d = torch.load(sf_agent_checkpoint)
-    #     # new_d = {}
-    #     # for layer in d:
-    #     #     if "backward_net." in layer:
-    #     #         new_layer = '.'.join(layer.split('.')[-2:])
-    #     #         new_d[new_layer] = d[layer]
-    #     # sf_agent.g.load_state_dict(new_d)
-
-    # Training a policy:
+        topk = int(len(expressivities) * TOP_EXPRESSIVITY_PERCENTAGE)
+        topk_expressivities_idx = expressivities.argsort()[-topk:]
+        
+        set_of_zs = stored_zs[topk_expressivities_idx]
+        
+        _, bins, _ = plt.hist(expressivities, bins=100)
+        _ = plt.hist(expressivities[topk_expressivities_idx], bins=bins)
+        plt.savefig(f"{LOGS_FOLDER}/expressivities.png")
+        plt.close()
+        
+        
+    
 
     ################################################################################################################################]:
 
@@ -1011,6 +1046,13 @@ if __name__ == "__main__":
         z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
         z = F.normalize(z, dim=-1)
         return z
+    
+    def sample_z_from_set(num_reward_functions, set_of_zs):    
+        z = set_of_zs[torch.randint(0, set_of_zs.shape[0], (num_reward_functions,))]
+        z = F.normalize(z, dim=-1)
+        z = z.to(device)  
+        return z
+    
 
     for steps in tqdm(range(1_000_000)):
 
@@ -1020,7 +1062,11 @@ if __name__ == "__main__":
         num_states = 64
         batch_size = num_reward_functions*num_states
 
-        z = sample_z(num_reward_functions)
+        if TOP_EXPRESSIVITY_PERCENTAGE == 1:
+            z = sample_z(num_reward_functions)
+        else:
+            z = sample_z_from_set(num_reward_functions, set_of_zs)
+            
         z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)
 
         obs, action, next_obs, terminals, obs_aux = get_iql_training_data(dataset, batch_size=batch_size)
