@@ -151,10 +151,19 @@ if __name__ == "__main__":
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
     exp_name = f'SF-TD3-{SF_METHOD}-{ENV_NAME}'
+        
+    if TOP_EXPRESSIVITY_PERCENTAGE != 1 and TOP_EXPRESSIVITY_PERCENTAGE != 'CEM':
+        exp_name = f'{exp_name}-topp={TOP_EXPRESSIVITY_PERCENTAGE}'
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
+        exp_name = f'{exp_name}-CEM'
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
+        exp_name = f'{exp_name}-TRAJ_Z'
+        
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
-    if TOP_EXPRESSIVITY_PERCENTAGE != 1:
-         exp_name = f'{exp_name}-topp={TOP_EXPRESSIVITY_PERCENTAGE}'
+        
+        
+        
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
     MODEL_SAVE_FOLDER = f'./models/{date_time_str}_{exp_name}'
@@ -787,6 +796,7 @@ if __name__ == "__main__":
                 axs[2].plot(losses)
                 axs[2].set_ylim([0, 0.1])
                 plt.savefig(f'{LOGS_FOLDER}/sf_training_losses.png')
+                plt.close()
 
             if steps % 1000 == 0:
                 torch.save(sf_agent.state_dict(), f'{MODEL_SAVE_FOLDER}/{ENV_NAME}_{SF_METHOD}.pth')
@@ -794,12 +804,11 @@ if __name__ == "__main__":
         torch.save(sf_agent.state_dict(), f'{MODEL_SAVE_FOLDER}/{ENV_NAME}_{SF_METHOD}.pth')
     
 
+    def signal2noise(r):
+        return r.mean(dim=-1).std(dim=-1) / r.std(dim=-1).mean(dim=-1)
     
-    
-    if TOP_EXPRESSIVITY_PERCENTAGE != 1:
-        def signal2noise(r):
-            return r.mean(dim=-1).std(dim=-1) / r.std(dim=-1).mean(dim=-1)
-
+    if isinstance(TOP_EXPRESSIVITY_PERCENTAGE, float) and TOP_EXPRESSIVITY_PERCENTAGE != 1:
+        
         expressivities = []
         stored_zs = []
 
@@ -832,6 +841,7 @@ if __name__ == "__main__":
         
         topk = int(len(expressivities) * TOP_EXPRESSIVITY_PERCENTAGE)
         topk_expressivities_idx = expressivities.argsort()[-topk:]
+        # topk_expressivities_idx = expressivities.argsort()[:topk]
         
         set_of_zs = stored_zs[topk_expressivities_idx]
         
@@ -841,7 +851,171 @@ if __name__ == "__main__":
         plt.close()
         
         
+        
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
+        
+        
+        
+        expressivities = []
+        stored_zs = []
+
+        num_reward_functions = 1
+        num_states = 100000
+        observations, actions, next_observations, terminals, obs_aux = get_iql_training_data(dataset, batch_size=num_states)
+        observations = dataset.trajectories[::10, ::10].to(device).reshape(-1, STATE_DIM)
+        obs_aux = torch.tensor(aux[::10, ::10]).to(device).reshape(-1, aux.shape[-1])
+
+        with torch.no_grad():
+            sf_agent_g_observations = sf_agent.g(observations)
+
+
+        for _ in tqdm(range(10000)):
+            z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
+            z = F.normalize(z, dim=-1)
+            stored_zs.append(z)
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            with torch.no_grad():
+                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+                expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
+
+        expressivities = torch.tensor(expressivities)
+        stored_zs = torch.concat(stored_zs)
+
+        idz = expressivities.argsort()
+        expressivities = expressivities[idz]
+        stored_zs = stored_zs[idz]
+        
+        
+        test_all_rewards = []
+        test_stored_zs = []
+
+        for benchmark_id in tqdm(range(len(benchmarks))):    
+            with torch.no_grad():
+                benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
+                rewards_ = benchmark_reward_function(obs_aux.cpu(), benchmark_param)
+                z = (sf_agent_g_observations * rewards_.unsqueeze(-1).cuda()).mean(dim=0)
+                z = F.normalize(z, dim=-1)
+                test_stored_zs.append(z)
+                
+                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+                
+                rewards = (sf_agent.g(observations) * z).sum(dim=-1).unsqueeze(-1).cpu().flatten()
+                test_all_rewards.append(rewards.reshape(1000, 100))
+
+
+        test_all_rewards = torch.stack(test_all_rewards)
+        test_cum_rewards = test_all_rewards.mean(dim=-1)
+        test_stored_zs = torch.stack(test_stored_zs)
+        
+        
+        
+        def sample_full(mean, cov, n):
+            L = torch.linalg.cholesky(cov)
+            return mean + torch.randn(n, mean.numel(), device=mean.device) @ L.T 
+
+        mean = torch.zeros((50,), dtype=torch.float32, device=device)
+        cov = torch.eye(50, dtype=torch.float32, device=device)
+        
+        for _ in tqdm(range(5)):
+            new_expressivities = []
+            new_stored_zs = []
+
+            num_reward_functions = 1
+            num_states = 100000
+            observations, actions, next_observations, terminals, obs_aux = get_iql_training_data(dataset, batch_size=num_states)
+            observations = dataset.trajectories[::10, ::10].to(device).reshape(-1, STATE_DIM)
+            obs_aux = torch.tensor(aux[::10, ::10]).to(device).reshape(-1, aux.shape[-1])
+
+            with torch.no_grad():
+                sf_agent_g_observations = sf_agent.g(observations)
+
+
+            for _ in range(2000):
+                
+                z = sample_full(mean, cov, n=1)    
+                z = F.normalize(z, dim=-1)
+                
+                new_stored_zs.append(z)
+                
+                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+                with torch.no_grad():
+                    rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+                    new_expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
+
+            new_expressivities = torch.tensor(new_expressivities)
+            new_stored_zs = torch.concat(new_stored_zs)
+
+            idz = new_expressivities.argsort()
+            new_expressivities = new_expressivities[idz]
+            new_stored_zs = new_stored_zs[idz]
+
+
+            # elites = new_stored_zs[-1000:]
+            # mean = elites.mean(dim=0)
+            # diff = elites - mean
+            # K = elites.shape[0]
+            # cov = diff.T @ diff / K
+            
+        # set_of_zs = new_stored_zs
+            
+        _, bins, _ = plt.hist(expressivities, bins=100)
+        _, bins, _ = plt.hist(new_expressivities, bins=100)
+        
+        plt.savefig(f"{LOGS_FOLDER}/new_expressivities.png")
+        plt.close()
+        
+        
+        
+        fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
+
+        for benchmark_id in range(len(benchmarks)):
+
+            # Find the closest latent in the old z set:
+            sim_idz = (stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
+            i = sim_idz[-1]
+            z = stored_zs[[i]]
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            with torch.no_grad():
+                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+            axs[benchmark_id, 0].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
+            axs[benchmark_id, 0].set_title('closest from expressivities')
+
+
+            # Find the closest latent in the new z set (after expressivity maximization):
+            sim_idz = (new_stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
+            i = sim_idz[-1]
+            z = new_stored_zs[[i]]
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            with torch.no_grad():
+                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+            axs[benchmark_id, 1].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
+            axs[benchmark_id, 1].set_title('closest from new_expressivities')
+
+            # The reconstructed reward function:
+            i = benchmark_id
+            z = test_stored_zs[[i]]
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            with torch.no_grad():
+                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
+                
+            axs[benchmark_id, 2].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
+            axs[benchmark_id, 2].set_title('real')
+
+        plt.savefig(f"{LOGS_FOLDER}/old_vs_new_zs.png")
+        plt.close()
+    # break
     
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
+        with torch.no_grad():
+            sf_agent_g_all_observations = [ sf_agent.g(dataset.trajectories[i].to(device)).cpu() for i in tqdm(range(len(dataset.trajectories)), desc='traj_z') ]
+            sf_agent_g_all_observations = torch.stack(sf_agent_g_all_observations)
+            
+        trajectories_z = sf_agent_g_all_observations.mean(dim=1)
+        # trajectories_z = sf_agent_g_all_observations.reshape(10000*5, 200, 50).mean(dim=1)
+        # trajectories_z = sf_agent_g_all_observations.reshape(-1, 50)[torch.randint(0, 10000*1000, (50000,))]
+        trajectories_z = F.normalize(trajectories_z, dim=-1)
+        trajectories_z = trajectories_z.to(device)
+        
 
     ################################################################################################################################]:
 
@@ -1064,8 +1238,14 @@ if __name__ == "__main__":
 
         if TOP_EXPRESSIVITY_PERCENTAGE == 1:
             z = sample_z(num_reward_functions)
-        else:
+        elif isinstance(TOP_EXPRESSIVITY_PERCENTAGE, float) and TOP_EXPRESSIVITY_PERCENTAGE < 1:
             z = sample_z_from_set(num_reward_functions, set_of_zs)
+        elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
+            z = sample_full(mean, cov, num_reward_functions)
+        elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
+            z = sample_z_from_set(num_reward_functions, trajectories_z)
+        else:
+            raise ValueError('Wthh dude')
             
         z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)
 
@@ -1142,15 +1322,14 @@ if __name__ == "__main__":
         
         
         
-        soft_update_params(agent.successor_net, agent.target_successor_net, tau=0.005)
+        soft_update_params(agent.successor_net, agent.target_successor_net, tau=0.01)
 
         
         if steps % 10_000 == 0:
             clear_output(True)
-            benchmark_rewards = run_benchmark(env, agent, benchmarks, 1)
+            benchmark_rewards = run_benchmark(env, agent, benchmarks, 5)
             
             rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
-            # print(rewards_logs)
             num_cols = 4
             num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
             fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
