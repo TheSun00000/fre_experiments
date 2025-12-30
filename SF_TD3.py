@@ -68,6 +68,48 @@ def add_largest_maze_walls(ax):
         
 
 
+from sklearn.mixture import GaussianMixture
+
+class LatentTaskSampler:
+    def __init__(self, n_components=20):
+        """
+        n_components: The number of 'clusters' of tasks. 
+        Increase this if your environment has many distinct behaviors.
+        """
+        self.gmm = GaussianMixture(
+            n_components=n_components, 
+            covariance_type='full', 
+            random_state=42,
+            verbose=2
+        )
+        self.is_fitted = False
+
+    def fit(self, realistic_z_vectors):
+        """
+        realistic_z_vectors: numpy array of shape (N_samples, D_latent)
+        These should be your mean(phi(s)) from sub-trajectories.
+        """
+        print(f"Fitting GMM on {len(realistic_z_vectors)} task vectors...")
+        self.gmm.fit(realistic_z_vectors)
+        self.is_fitted = True
+
+    def sample(self, n_samples=1):
+        """
+        Generates new z vectors from the learned manifold.
+        """
+        if not self.is_fitted:
+            raise ValueError("GMM must be fitted before sampling!")
+
+        # 1. Sample from the GMM
+        z_samples, _ = self.gmm.sample(n_samples)
+
+        z_samples = torch.tensor(z_samples).float()
+        z_samples = F.normalize(z_samples, dim=-1)
+
+        return z_samples
+
+
+
 
 
 def auto_cast(x):
@@ -152,12 +194,14 @@ if __name__ == "__main__":
     
     exp_name = f'SF-TD3-{SF_METHOD}-{ENV_NAME}'
         
-    if TOP_EXPRESSIVITY_PERCENTAGE != 1 and TOP_EXPRESSIVITY_PERCENTAGE != 'CEM':
+    if TOP_EXPRESSIVITY_PERCENTAGE != 1 and isinstance(TOP_EXPRESSIVITY_PERCENTAGE, float):
         exp_name = f'{exp_name}-topp={TOP_EXPRESSIVITY_PERCENTAGE}'
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
         exp_name = f'{exp_name}-CEM'
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
         exp_name = f'{exp_name}-TRAJ_Z'
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
+        exp_name = f'{exp_name}-GMM'
         
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
@@ -1009,13 +1053,47 @@ if __name__ == "__main__":
         with torch.no_grad():
             sf_agent_g_all_observations = [ sf_agent.g(dataset.trajectories[i].to(device)).cpu() for i in tqdm(range(len(dataset.trajectories)), desc='traj_z') ]
             sf_agent_g_all_observations = torch.stack(sf_agent_g_all_observations)
-            
+        
+        sf_agent_g_all_observations = sf_agent_g_all_observations.reshape(10000*10, 100, 50)
+
         trajectories_z = sf_agent_g_all_observations.mean(dim=1)
         # trajectories_z = sf_agent_g_all_observations.reshape(10000*5, 200, 50).mean(dim=1)
         # trajectories_z = sf_agent_g_all_observations.reshape(-1, 50)[torch.randint(0, 10000*1000, (50000,))]
         trajectories_z = F.normalize(trajectories_z, dim=-1)
         trajectories_z = trajectories_z.to(device)
         
+        print('trajectories_z.shape =', trajectories_z.shape)
+    
+    
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
+        trajectories_z = []
+        with torch.no_grad():
+            for _ in tqdm(range(100_000), desc="gmm subtrajectories"):
+                i = torch.randint(0, NUM_TRAJECTORIES, (1,))
+                j = torch.randint(0, TRAJECTORY_LEN - 200, (1,))  
+                trajectories_z.append( sf_agent.g(dataset.trajectories[i, j:j+200].to(device)).mean(dim=1).cpu() )
+                # break
+            trajectories_z = torch.concat(trajectories_z)
+            
+        trajectories_z = F.normalize(trajectories_z, dim=-1)
+        trajectories_z = trajectories_z.to(device)
+
+
+        # --- Usage Example ---
+        # sub_trajectory_z = np.random.randn(1000, 64) # Replace with your real data
+        sampler = LatentTaskSampler(n_components=20)
+        sampler.fit(trajectories_z.cpu())
+
+        
+        gmm_1k_z = sampler.sample(n_samples=1_000)
+        
+        plt.imshow( (gmm_1k_z @ gmm_1k_z.T).cpu() )
+        plt.savefig(f"{LOGS_FOLDER}/gmm.png")
+        plt.close()
+        
+        
+        gmm_1m_z = sampler.sample(n_samples=1_000_000)
+    
 
     ################################################################################################################################]:
 
@@ -1204,6 +1282,8 @@ if __name__ == "__main__":
     # precomputed_test_z = sf_agent.g(eval_obs).T @ eval_reward
     # precomputed_test_z = F.normalize(precomputed_test_z, dim=-1)
 
+    # precomputed_test_z = trajectories_z[  (trajectories_z - precomputed_test_z).pow(2).sum(dim=-1).argmin()  ]
+
 
 
 
@@ -1244,6 +1324,8 @@ if __name__ == "__main__":
             z = sample_full(mean, cov, num_reward_functions)
         elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
             z = sample_z_from_set(num_reward_functions, trajectories_z)
+        elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
+            z = sample_z_from_set(num_reward_functions, gmm_1m_z)
         else:
             raise ValueError('Wthh dude')
             
