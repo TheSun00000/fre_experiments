@@ -109,8 +109,123 @@ class LatentTaskSampler:
         return z_samples
 
 
+from matplotlib.patches import Polygon
+class VectorizedPlusWorld:
+    def __init__(self, delta=0.1, batch_size=1024):
+        self.delta = delta
+        self.bounds = (-1.0, 1.0)
+        self.batch_size = batch_size
 
+    def reset(self, position=None):
+        if position is None:
+            states = self.sample_valid_states(self.batch_size)
+        else:
+            states = np.array(position).reshape(1, 2).repeat(self.batch_size, 1)
+        return states
+    
+    def step(self, states, actions, step_size=0.05):
+        """
+        states: (N, 2) array
+        actions: (N, 2) array
+        Returns: next_states (N, 2)
+        """
+        # 1. Proposed movement
+        next_states = states + actions * step_size
+        
+        # 2. Global boundary clipping (The outer square)
+        next_states = np.clip(next_states, self.bounds[0], self.bounds[1])
+        
+        # 3. Identify which proposed states are invalid (in the corners)
+        # A state is valid if |x| <= delta OR |y| <= delta
+        is_valid = (np.abs(next_states[:, 0]) <= self.delta) | (np.abs(next_states[:, 1]) <= self.delta)
+        invalid_mask = ~is_valid
+        
+        # 4. Sliding Logic for invalid states
+        # We need to know where they were BEFORE the invalid move
+        in_horizontal = np.abs(states[:, 1]) <= self.delta
+        in_vertical = np.abs(states[:, 0]) <= self.delta
+        
+        # For those that moved from horizontal into a corner: clip their Y
+        # For those that moved from vertical into a corner: clip their X
+        
+        # Apply Y-clipping for those in the horizontal corridor hitting a wall
+        next_states[invalid_mask & in_horizontal, 1] = np.clip(
+            next_states[invalid_mask & in_horizontal, 1], -self.delta, self.delta
+        )
+        
+        # Apply X-clipping for those in the vertical corridor hitting a wall
+        next_states[invalid_mask & in_vertical, 0] = np.clip(
+            next_states[invalid_mask & in_vertical, 0], -self.delta, self.delta
+        )
+        
+        return next_states
 
+    def sample_valid_states(self, n):
+        """Uniformly samples n states from the plus-shaped manifold."""
+        states = np.zeros((n, 2))
+        
+        # Randomly decide which corridor each agent starts in
+        # 0 = Horizontal corridor, 1 = Vertical corridor
+        choices = np.random.randint(0, 2, size=n)
+        
+        # Horizontal: x in [-1, 1], y in [-delta, delta]
+        h_mask = (choices == 0)
+        states[h_mask, 0] = np.random.uniform(-1, 1, size=np.sum(h_mask))
+        states[h_mask, 1] = np.random.uniform(-self.delta, self.delta, size=np.sum(h_mask))
+        
+        # Vertical: x in [-delta, delta], y in [-1, 1]
+        v_mask = (choices == 1)
+        states[v_mask, 0] = np.random.uniform(-self.delta, self.delta, size=np.sum(v_mask))
+        states[v_mask, 1] = np.random.uniform(-1, 1, size=np.sum(v_mask))
+        
+        return states
+
+    
+    def plot_plus_world_boundaries(self, ax):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 6))
+
+        delta = self.delta
+        # 1. Define the 12 vertices of the "Plus" shape
+        # Starting from top-left of the vertical corridor and going clockwise
+        vertices = [
+            (-delta, 1.0),  (delta, 1.0),   # Top
+            (delta, delta), (1.0, delta),   # Top-Right corner turn
+            (1.0, -delta),  (delta, -delta),# Bottom-Right corner turn
+            (delta, -1.0),  (-delta, -1.0), # Bottom
+            (-delta, -delta), (-1.0, -delta),# Bottom-Left corner turn
+            (-1.0, delta),  (-delta, delta) # Top-Left corner turn
+        ]
+        
+        # 2. Draw the valid corridor outline
+        plus_shape = Polygon(vertices, closed=True, facecolor='none', edgecolor='black', linewidth=3, label='Environment Walls')
+        ax.add_patch(plus_shape)
+
+        # 3. Shade the "Invalid" Ghost Zones (The four corners)
+        # Top-Right, Top-Left, Bottom-Right, Bottom-Left
+        corners = [
+            [(delta, delta), (1.0, delta), (1.0, 1.0), (delta, 1.0)],
+            [(-delta, delta), (-1.0, delta), (-1.0, 1.0), (-delta, 1.0)],
+            [(delta, -delta), (1.0, -delta), (1.0, -1.0), (delta, -1.0)],
+            [(-delta, -delta), (-1.0, -delta), (-1.0, -1.0), (-delta, -1.0)]
+        ]
+        
+        for i, corner_coords in enumerate(corners):
+            label = "Unreachable Space" if i == 0 else None
+            corner_poly = Polygon(corner_coords, closed=True, alpha=0.0, label=label, hatch='/',)
+            ax.add_patch(corner_poly)
+
+        # 4. Formatting
+        ax.set_xlim(-1.05, 1.05)
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_aspect('equal')
+        # ax.set_xlabel('$x$-coordinate', fontsize=12)
+        # ax.set_ylabel('$y$-coordinate', fontsize=12)
+        # ax.set_title(f'Plus-World Manifold ($\delta={delta}$)', fontsize=14, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='upper right', fontsize=10)
+
+        return ax
 
 def auto_cast(x):
     for cast in (int, float):
@@ -163,7 +278,7 @@ if __name__ == "__main__":
     
     print(kwargs)
     
-    assert kwargs['env_name'] in ["antmaze", "cheetah", "walker"]
+    assert kwargs['env_name'] in ["antmaze", "cheetah", "walker", "plusmaze"]
     assert kwargs['sf_method'] in ["rand", "orth", "ae", "trans", "lra_p", "lra_sf", "fb"]
 
     ENV_NAME = kwargs['env_name']
@@ -202,6 +317,7 @@ if __name__ == "__main__":
         exp_name = f'{exp_name}-TRAJ_Z'
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
         exp_name = f'{exp_name}-GMM'
+    
         
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
@@ -277,6 +393,15 @@ if __name__ == "__main__":
         TRAJECTORY_LEN = 1001
         env = gym.make('antmaze-large-diverse-v2')
         dataset = env.get_dataset()
+        
+    elif ENV_NAME == 'plusmaze':
+        STATE_DIM = 2
+        ACTION_DIM = 2
+        NUM_TRAJECTORIES = 10000
+        TRAJECTORY_LEN = 1000
+        env = VectorizedPlusWorld(batch_size=1)
+        dataset = np.load('datasets/plusmaze.npy', allow_pickle=True).item()
+        aux = dataset['observations']
 
 
     ################################################################################################################################
@@ -290,7 +415,6 @@ if __name__ == "__main__":
     dataset_timeouts = torch.zeros(NUM_TRAJECTORIES, TRAJECTORY_LEN).bool()
     dataset_timeouts[:, -1] = True
 
-    dataset_goals = torch.tensor(dataset['infos/goal']).float()
 
     if ENV_NAME == 'antmaze':
         N = NUM_TRAJECTORIES * TRAJECTORY_LEN
@@ -370,7 +494,22 @@ if __name__ == "__main__":
             (TestRewLoop().compute_reward, 'path_loop', None),
             (TestRewMatrixEdges().compute_reward, 'path_edges', None)
         ]
+    if ENV_NAME == 'plusmaze':
+        def goal_reaching_reward(position, goal):
+            goal = torch.tensor(goal)
+            r = (position.cpu() - goal.cpu()).pow(2).mean(dim=-1) < 0.005
+            return r.float()
 
+        benchmarks = [
+            (goal_reaching_reward, 'goal_mid_bottom', (0, -0.5)),
+            (goal_reaching_reward, 'goal_center', (0, 0)),
+            (goal_reaching_reward, 'goal_mid_top', (0, 0.5)),
+            (goal_reaching_reward, 'goal_top', (0, 0.9)),
+            (goal_reaching_reward, 'goal_top_right', (0.5, 0)),
+            (goal_reaching_reward, 'goal_right', (0.9, 0)),
+            (goal_reaching_reward, 'goal_top_left', (-0.5, 0)),
+            (goal_reaching_reward, 'goal_left', (-0.9, 0)),
+        ]
 
     ################################################################################################################################]:
 
@@ -411,6 +550,56 @@ if __name__ == "__main__":
 
 
     ################################################################################################################################]:
+
+    def run_test_plusmaze(env, agent, benchmarks, benchmark_id, num_evals):
+
+        benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
+
+        produced_trajectories = []
+        produced_trajectories_physics = []
+
+        for _ in range(num_evals):
+        # _, encode_obs, _ = sample_reward_function_fre(batch_size=1, num_random_samples=num_eval_anchors)
+            nb_eval_samples = 10000
+            eval_obs, _, _, _, eval_aux = get_iql_training_data(dataset, batch_size=nb_eval_samples)
+            benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
+            eval_reward = benchmark_reward_function(eval_aux, benchmark_param).to(device)
+
+            # meta = agent.infer_meta_from_obs_and_rewards(eval_obs, eval_reward)
+            
+            z = sf_agent.g(eval_obs).T @ eval_reward
+            z = F.normalize(z, dim=-1)
+            
+            eval_obs, eval_reward
+                
+            start_position = np.random.random((2,)) * 0.14 - 0.07   # [-0.07, 0.07]^2
+            state = env.reset(position=start_position)        
+            
+            produced_trajectory = []   
+
+
+            for step in tqdm(range(1000)):
+                        
+                produced_trajectory.append(state)
+                        
+                with torch.no_grad():
+                    tensor_state = torch.tensor(state).reshape(-1).to(device).float()
+                    action = agent.actor_forward(tensor_state, z).mean.cpu().numpy()
+                    # action = np.random.random((2,)) * 2 - 1
+
+                next_state = env.step(state, action.reshape(1, -1))
+                
+                state = next_state
+                
+                
+            produced_trajectory = np.stack(produced_trajectory)
+                    
+            produced_trajectories.append(produced_trajectory)
+
+        produced_trajectories = np.stack(produced_trajectories)
+        produced_trajectories = produced_trajectories.squeeze(-2)
+
+        return produced_trajectories, z
 
 
     def timestep2obs(timestep):
@@ -522,7 +711,11 @@ if __name__ == "__main__":
                     produced_trajectory_aux = produced_trajectory[..., -2:]
                 elif ENV_NAME == 'walker':
                     produced_trajectory_aux = produced_trajectory[..., -4:]
-                    
+            
+            elif ENV_NAME == 'plusmaze':
+                produced_trajectory, z = run_test_plusmaze(
+                    env, agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals
+                )
 
             
             eval_obs, _, _, _, eval_aux = get_iql_training_data(dataset, batch_size=10_000)
@@ -558,7 +751,13 @@ if __name__ == "__main__":
                     torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
                     c='red', s=1
                 )
-
+            
+            elif ENV_NAME == 'plusmaze':
+                axs[benchmark_id, 0].scatter(eval_obs[..., 0], eval_obs[..., 1], c=real_eval_rewards)
+                axs[benchmark_id, 1].scatter(eval_obs[..., 0], eval_obs[..., 1], c=eval_rewards)
+                for j in range(produced_trajectory.shape[0]):
+                    axs[benchmark_id, 2].plot(produced_trajectory[j, :, 0], produced_trajectory[j, :, 1], c='red')
+                env.plot_plus_world_boundaries(axs[benchmark_id, 2])
                 
             axs[benchmark_id, 0].set_title(f'{benchmark_test_label}')
             axs[benchmark_id, 1].set_title(f'Reconstructed Reward Function')
@@ -586,7 +785,9 @@ if __name__ == "__main__":
                 trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -2:]).reshape(1, -1, 2)
             elif ENV_NAME == 'walker':
                 trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -4:]).reshape(1, -1, 4) 
-                
+            elif ENV_NAME == 'plusmaze':
+                trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., :]).reshape(1, -1, 2)
+            
             trajectory_states_rewards = benchmark_reward_function(trajectory_states_aux, benchmark_param).float()
             trajectory_states_rewards = trajectory_states_rewards.reshape(
                 all_produced_trajectories.shape[1],
@@ -804,6 +1005,10 @@ if __name__ == "__main__":
         g_input_dim=g_input_dim, g_output_dim=g_output_dim,
         hidden_dim=hidden_dim
     ).to(device)
+    
+    if ENV_NAME == 'plusmaze':
+        sf_agent.g[4] = nn.Tanh()
+        sf_agent.target_g[4] = nn.Tanh()
 
     if sf_agent_checkpoint != 'new':
         # if os.path.exists(sf_agent_checkpoint):
@@ -1070,8 +1275,8 @@ if __name__ == "__main__":
         with torch.no_grad():
             for _ in tqdm(range(100_000), desc="gmm subtrajectories"):
                 i = torch.randint(0, NUM_TRAJECTORIES, (1,))
-                j = torch.randint(0, TRAJECTORY_LEN - 200, (1,))  
-                trajectories_z.append( sf_agent.g(dataset.trajectories[i, j:j+200].to(device)).mean(dim=1).cpu() )
+                j = torch.randint(0, TRAJECTORY_LEN - 100, (1,))  
+                trajectories_z.append( sf_agent.g(dataset.trajectories[i, j:j+100].to(device)).mean(dim=1).cpu() )
                 # break
             trajectories_z = torch.concat(trajectories_z)
             
