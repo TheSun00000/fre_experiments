@@ -19,7 +19,7 @@ from datetime import datetime
 
 from dm_control import suite
 
-from new_utils.benchmark import VelocityRewardFunctionCheetah, VelocityRewardFunctionWalker
+from new_utils.benchmark import VelocityRewardFunctionCheetah, VelocityRewardFunctionWalker, RewardFunctionQuadruped
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # device = 'cpu'
@@ -278,7 +278,7 @@ if __name__ == "__main__":
     
     print(kwargs)
     
-    assert kwargs['env_name'] in ["antmaze", "cheetah", "walker", "plusmaze"]
+    assert kwargs['env_name'] in ["antmaze", "cheetah", "walker", "quadruped", "plusmaze"]
     assert kwargs['sf_method'] in ["rand", "orth", "ae", "trans", "lra_p", "lra_sf", "fb"]
 
     ENV_NAME = kwargs['env_name']
@@ -383,7 +383,21 @@ if __name__ == "__main__":
             angmomentum_aux.reshape(10000, 1000, 1)
         ), axis=-1)
         # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
-        
+    
+    elif ENV_NAME == 'quadruped':
+        STATE_DIM = 78
+        ACTION_DIM = 12
+        AUX_DIM = 5
+        NUM_TRAJECTORIES = 10000
+        TRAJECTORY_LEN = 1001
+        env = suite.load(
+            domain_name='quadruped',
+            task_name='run',
+            environment_kwargs=dict(flat_observation=True)
+        )
+        dataset = np.load('datasets/quadruped_rnd_without_physics.npy', allow_pickle=True).item()
+        aux = np.load('datasets/aux_quadruped.npy', allow_pickle=True)    
+    
     elif ENV_NAME == 'antmaze':
         import gym
         import d4rl
@@ -462,7 +476,7 @@ if __name__ == "__main__":
             (velocity_reward_function.compute_reward, 'vel10', 10),
             (velocity_reward_function.compute_reward, 'flip', 'flip'),
         ]
-    if ENV_NAME == 'walker':
+    elif ENV_NAME == 'walker':
         velocity_reward_function = VelocityRewardFunctionWalker()
         benchmarks = [
             (velocity_reward_function.compute_reward, 'stand', 0.0),
@@ -471,7 +485,15 @@ if __name__ == "__main__":
             (velocity_reward_function.compute_reward, 'run', 10),
             (velocity_reward_function.compute_reward, 'flip', 'flip'),
         ]
-    if ENV_NAME == 'antmaze':
+    elif ENV_NAME == 'quadruped':
+        quadruped_rewards = RewardFunctionQuadruped()
+        benchmarks = [
+            (quadruped_rewards.compute_reward_stand, 'stand', None),
+            (quadruped_rewards.compute_reward_walk, 'walk', None),
+            (quadruped_rewards.compute_reward_run, 'run', None),
+            (quadruped_rewards.compute_reward_jump, 'jump', None),
+        ]
+    elif ENV_NAME == 'antmaze':
         from utils.antmaze_benchmark import VelocityRewardFunction, SimplexRewardFunction, TestRewPath, TestRewLoop, TestRewMatrixEdges, goal_reaching_reward
         velocity_reward_function = VelocityRewardFunction()
         simplex_reward_function = SimplexRewardFunction(num_simplex=10)
@@ -494,10 +516,16 @@ if __name__ == "__main__":
             (TestRewLoop().compute_reward, 'path_loop', None),
             (TestRewMatrixEdges().compute_reward, 'path_edges', None)
         ]
-    if ENV_NAME == 'plusmaze':
+    elif ENV_NAME == 'plusmaze':
         def goal_reaching_reward(position, goal):
             goal = torch.tensor(goal)
             r = (position.cpu() - goal.cpu()).pow(2).mean(dim=-1) < 0.005
+            return r.float()
+        
+        def guassian_reward(position, center):
+            center = torch.tensor(center)
+            r = 1 - (position.cpu() - center.cpu()).pow(2).mean(dim=-1) * 2
+            r = r.clip(-1, 1)
             return r.float()
 
         benchmarks = [
@@ -509,6 +537,15 @@ if __name__ == "__main__":
             (goal_reaching_reward, 'goal_right', (0.9, 0)),
             (goal_reaching_reward, 'goal_top_left', (-0.5, 0)),
             (goal_reaching_reward, 'goal_left', (-0.9, 0)),
+
+            (guassian_reward, 'goal_top_left', (-0.9, 0.9)),
+            (guassian_reward, 'goal_top_right', (0.9, 0.9)),
+            (guassian_reward, 'goal_bottom_left', (-0.9, -0.9)),
+            (guassian_reward, 'goal_bottom_right', (0.9, -0.9)),
+            # (guassian_reward, 'goal_mid_top_left', (-0.5, 0.5)),
+            # (guassian_reward, 'goal_mid_top_right', (0.5, 0.5)),
+            # (guassian_reward, 'goal_mid_bottom_left', (-0.5, -0.5)),
+            # (guassian_reward, 'goal_mid_bottom_right', (0.5, -0.5)),
         ]
 
     ################################################################################################################################]:
@@ -572,7 +609,8 @@ if __name__ == "__main__":
             
             eval_obs, eval_reward
                 
-            start_position = np.random.random((2,)) * 0.14 - 0.07   # [-0.07, 0.07]^2
+            # start_position = np.random.random((2,)) * 0.14 - 0.07   # [-0.07, 0.07]^2
+            start_position = np.random.random((2,)) * 0.14 - 0.07 - (0.0, 0.9)
             state = env.reset(position=start_position)        
             
             produced_trajectory = []   
@@ -658,6 +696,13 @@ if __name__ == "__main__":
                     angmomentum = env.physics.named.data.subtree_angmom['torso'][1]
                     aux = np.array([horizontal_velocity, angmomentum])
                 
+                elif state.shape[-1] == 78: # quadruped:
+                    torso_velocity = env.physics.torso_velocity()
+                    torso_upright = env.physics.torso_upright()
+                    com_height = env.physics.named.data.sensordata['center_of_mass'].copy()[2]                    
+                    aux = np.concatenate([torso_velocity, np.array([torso_upright]), np.array([com_height])])
+            
+                
                 observation_aux = np.concatenate([state, aux])
                 
                 produced_trajectory.append(observation_aux)
@@ -701,7 +746,7 @@ if __name__ == "__main__":
             benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
             print(benchmark_test_label)
             
-            if ENV_NAME in ['cheetah', 'walker']:
+            if ENV_NAME in ['cheetah', 'walker', 'quadruped']:
                 
                 produced_trajectory, produced_trajectory_physics, z = run_test_dmc(
                     env, agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals
@@ -711,6 +756,8 @@ if __name__ == "__main__":
                     produced_trajectory_aux = produced_trajectory[..., -2:]
                 elif ENV_NAME == 'walker':
                     produced_trajectory_aux = produced_trajectory[..., -4:]
+                elif ENV_NAME == 'quadruped':
+                    produced_trajectory_aux = produced_trajectory[..., -5:]
             
             elif ENV_NAME == 'plusmaze':
                 produced_trajectory, z = run_test_plusmaze(
@@ -752,6 +799,13 @@ if __name__ == "__main__":
                     c='red', s=1
                 )
             
+            elif ENV_NAME == 'quadruped':
+                axs[benchmark_id, 0].scatter(eval_aux[..., 0], eval_aux[..., 3], c=real_eval_rewards)
+                axs[benchmark_id, 1].scatter(eval_aux[..., 0], eval_aux[..., 3], c=eval_rewards)
+                for j in range(produced_trajectory.shape[0]):
+                    axs[benchmark_id, 2].plot(produced_trajectory_aux[j, :, 0], produced_trajectory_aux[j, :, 3], c='red')
+                
+            
             elif ENV_NAME == 'plusmaze':
                 axs[benchmark_id, 0].scatter(eval_obs[..., 0], eval_obs[..., 1], c=real_eval_rewards)
                 axs[benchmark_id, 1].scatter(eval_obs[..., 0], eval_obs[..., 1], c=eval_rewards)
@@ -784,7 +838,9 @@ if __name__ == "__main__":
             if ENV_NAME == 'cheetah':
                 trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -2:]).reshape(1, -1, 2)
             elif ENV_NAME == 'walker':
-                trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -4:]).reshape(1, -1, 4) 
+                trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -4:]).reshape(1, -1, 4)
+            elif ENV_NAME == 'quadruped':
+                trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -5:]).reshape(1, -1, 5) 
             elif ENV_NAME == 'plusmaze':
                 trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., :]).reshape(1, -1, 2)
             
@@ -1017,7 +1073,7 @@ if __name__ == "__main__":
         
         losses = []
         
-        for steps in tqdm(range(100_000), desc='SF agent training'):
+        for steps in tqdm(range(10), desc='SF agent training'):
         
             # break
             

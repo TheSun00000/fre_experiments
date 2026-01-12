@@ -124,3 +124,88 @@ class VelocityRewardFunctionWalker:
     
 
 
+class RewardFunctionQuadruped:
+    """
+    Physics: (..., 5):
+        torso_velocity[3], torso_upright, com_height
+    """
+    def __init__(self,):
+        pass
+    
+    def _sigmoids(self, x, value_at_1, sigmoid):
+        if sigmoid == 'linear':
+            scale = 1-value_at_1
+            scaled_x = x*scale
+            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
+        else:
+            raise NotImplementedError
+    
+    
+    def tolerance(self, x, bounds, margin=0.0, sigmoid='linear', value_at_margin=0):
+        lower, upper = bounds
+        in_bounds = np.logical_and(lower <= x, x <= upper)
+        d = np.where(x < lower, lower - x, x - upper) / margin
+        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
+        return value
+    
+    
+    def _upright_reward(self, physics, deviation_angle: int = 0):
+        
+        torso_upright = physics[..., [3]]
+        
+        deviation = np.cos(np.deg2rad(deviation_angle))
+        return self.tolerance(
+            torso_upright,
+            bounds=(deviation, float('inf')),
+            sigmoid='linear',
+            margin=1 + deviation,
+            value_at_margin=0)
+    
+    
+    def compute_reward_move(self, physics, _desired_speed):
+                
+        torso_velocity = physics[..., [0]]
+        move_reward = self.tolerance(
+            torso_velocity,
+            bounds=(_desired_speed, float('inf')),
+            margin=_desired_speed,
+            value_at_margin=0.5,
+            sigmoid='linear'
+        )
+
+        return self._upright_reward(physics) * move_reward
+    
+    
+    def compute_reward_walk(self, physics, _=None):
+        rew = self.compute_reward_move(physics, _desired_speed=0.5)
+        return torch.tensor(rew, dtype=torch.float32).reshape(-1)
+    
+    def compute_reward_run(self, physics, _=None):
+        rew = self.compute_reward_move(physics, _desired_speed=5)
+        return torch.tensor(rew, dtype=torch.float32).reshape(-1)
+    
+    def compute_reward_stand(self, physics, _=None):
+        rew = self._upright_reward(physics)
+        return torch.tensor(rew, dtype=torch.float32).reshape(-1)
+    
+    def compute_reward_jump(self, physics, _=None):
+        
+        _desired_height = 1.0
+        
+        com_height = physics[..., [4]]
+        jump_up = self.tolerance(
+            com_height,
+            bounds=(_desired_height, float('inf')),
+            margin=_desired_height,
+            value_at_margin=0.5,
+            sigmoid='linear')
+
+        rew = self._upright_reward(physics) * jump_up
+        return torch.tensor(rew, dtype=torch.float32).reshape(-1)
+
+
+
+
+
+
+
