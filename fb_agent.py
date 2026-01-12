@@ -15,6 +15,7 @@ import dataclasses
 
 import os
 from datetime import datetime
+from new_utils.benchmark import VelocityRewardFunctionCheetah, VelocityRewardFunctionWalker, RewardFunctionQuadruped
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -24,7 +25,7 @@ print(device)
 
 
 
-ENV_NAME = 'cheetah' # cheetah | walker | antmaze
+ENV_NAME = 'quadruped' # cheetah | walker | antmaze | quadruped
 
 
 
@@ -92,6 +93,20 @@ elif ENV_NAME == 'walker':
         angmomentum_aux.reshape(10000, 1000, 1)
     ), axis=-1)
     # dataset['observations'] = np.concatenate((dataset['observations'], aux.reshape(10000, 1000, 3)), axis=-1)
+    
+elif ENV_NAME == 'quadruped':
+    STATE_DIM = 78
+    ACTION_DIM = 12
+    AUX_DIM = 5
+    NUM_TRAJECTORIES = 10000
+    TRAJECTORY_LEN = 1001
+    env = suite.load(
+        domain_name='quadruped',
+        task_name='run',
+        environment_kwargs=dict(flat_observation=True)
+    )
+    dataset = np.load('datasets/quadruped_rnd_without_physics.npy', allow_pickle=True).item()
+    aux = np.load('datasets/aux_quadruped.npy', allow_pickle=True)
 
 elif ENV_NAME == 'antmaze':
     import gym
@@ -149,126 +164,6 @@ dataset_trajectories_cuda = dataset_trajectories.to(device)
 
 
 
-
-class VelocityRewardFunctionCheetah:
-    def __init__(self):
-        pass    
-    
-    def _sigmoids(self, x, value_at_1, sigmoid):
-        if sigmoid == 'linear':
-            scale = 1-value_at_1
-            scaled_x = x*scale
-            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
-        else:
-            raise NotImplementedError
-    
-    def tolerance(self, x, lower, upper, margin=0.0, sigmoid='linear', value_at_margin=0):
-        in_bounds = np.logical_and(lower <= x, x <= upper)
-        d = np.where(x < lower, lower - x, x - upper) / margin
-        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
-        return value
-    
-    def compute_reward(self, states, params):
-        
-        if params != 'flip':
-            if isinstance(params, int):
-                params = torch.full((*states.shape[:-1], 1), fill_value=params)
-            
-            assert len(states.shape) == len(params.shape), states.shape # (batch_size, obs_dim) OR (batch_size, num_pairs, obs_dim)
-
-            horizontal_velocity = states[..., [0]]
-            sign_of_param = np.sign(params)
-            horizontal_velocity = horizontal_velocity * sign_of_param
-            rew = self.tolerance(horizontal_velocity,
-                                lower=np.abs(params),
-                                upper=float('inf'),
-                                margin=np.abs(params),
-                                value_at_margin=0,
-                                sigmoid='linear')
-            
-        else: # Flip
-            _SPIN_SPEED = 5
-            angmomentum = states[..., [1]]
-            rew = self.tolerance(angmomentum,
-                                lower=_SPIN_SPEED,
-                                upper=float('inf'),
-                                margin=_SPIN_SPEED,
-                                value_at_margin=0,
-                                sigmoid='linear')
-
-        return torch.tensor(rew[..., 0], dtype=torch.float32)
-    
-    
-    
-
-class VelocityRewardFunctionWalker:
-    def __init__(self):
-        pass    
-
-    def _sigmoids(self, x, value_at_1, sigmoid):
-        if sigmoid == 'gaussian':
-            scale = np.sqrt(-2 * np.log(value_at_1))
-            return np.exp(-0.5 * (x*scale)**2)
-
-        elif sigmoid == 'linear':
-            scale = 1-value_at_1
-            scaled_x = x*scale
-            return np.where(abs(scaled_x) < 1, 1 - scaled_x, 0.0)
-    
-    def tolerance(self, x, lower, upper, margin=0.0, sigmoid='gaussian', value_at_margin=0.1):
-        in_bounds = np.logical_and(lower <= x, x <= upper)
-        d = np.where(x < lower, lower - x, x - upper) / margin
-        value = np.where(in_bounds, 1.0, self._sigmoids(d, value_at_margin, sigmoid))
-        return torch.tensor(value)
-    
-    def compute_reward(self, states, params):
-        
-        if params != 'flip':
-            if isinstance(params, int) or isinstance(params, float):
-                params = torch.full((*states.shape[:-1], 1), fill_value=params)
-            
-            assert len(states.shape) == len(params.shape), states.shape # (batch_size, obs_dim) OR (batch_size, num_pairs, obs_dim)
-
-            _STAND_HEIGHT = 1.2
-            horizontal_velocity = states[..., [0]]
-            torso_upright = states[..., [1]]
-            torso_height = states[..., [2]]
-            standing = self.tolerance(torso_height, lower=_STAND_HEIGHT, upper=float('inf'), margin=_STAND_HEIGHT/2)
-            upright = (1 + torso_upright) / 2
-            stand_reward = (3*standing + upright) / 4
-            move_reward = self.tolerance(horizontal_velocity,
-                                            lower=params,
-                                            upper=float('inf'),
-                                            margin=params/2,
-                                            value_at_margin=0.5,
-                                            sigmoid='linear')
-            # move_reward[params == 0] = stand_reward[params == 0]
-            
-        
-        else: # flip
-            _STAND_HEIGHT = 1.2
-            _SPIN_SPEED = 5
-            horizontal_velocity = states[..., [0]]
-            torso_upright = states[..., [1]]
-            torso_height = states[..., [2]]
-            angmomentum = states[..., [3]]
-            standing = self.tolerance(torso_height, lower=_STAND_HEIGHT, upper=float('inf'), margin=_STAND_HEIGHT/2)
-            upright = (1 + torso_upright) / 2
-            stand_reward = (3*standing + upright) / 4
-            move_reward = self.tolerance(angmomentum,
-                                            lower=_SPIN_SPEED,
-                                            upper=float('inf'),
-                                            margin=_SPIN_SPEED,
-                                            value_at_margin=0.5,
-                                            sigmoid='linear')
-            # move_reward[params == 0] = stand_reward[params == 0]
-        
-        rew = stand_reward * (5*move_reward + 1) / 6    
-                
-        return torch.tensor(rew[..., 0], dtype=torch.float32)
-    
-    
-    
     
 if ENV_NAME == 'cheetah':
     velocity_reward_function = VelocityRewardFunctionCheetah()
@@ -282,11 +177,20 @@ if ENV_NAME == 'cheetah':
 elif ENV_NAME == 'walker':
     velocity_reward_function = VelocityRewardFunctionWalker()
     benchmarks = [
-        (velocity_reward_function.compute_reward, 'vel0.1', 0.1),
-        (velocity_reward_function.compute_reward, 'vel1', 1),
-        (velocity_reward_function.compute_reward, 'vel4', 4),
+        (velocity_reward_function.compute_reward, 'stand', 0),
+        (velocity_reward_function.compute_reward, 'walk', 2),
+        # (velocity_reward_function.compute_reward, 'vel4', 4),
         (velocity_reward_function.compute_reward, 'vel8', 8),
+        (velocity_reward_function.compute_reward, 'run', 10),
         (velocity_reward_function.compute_reward, 'flip', 'flip'),
+    ]
+if ENV_NAME == 'quadruped':
+    quadruped_rewards = RewardFunctionQuadruped()
+    benchmarks = [
+        (quadruped_rewards.compute_reward_stand, 'stand', None),
+        (quadruped_rewards.compute_reward_walk, 'walk', None),
+        (quadruped_rewards.compute_reward_run, 'run', None),
+        (quadruped_rewards.compute_reward_jump, 'jump', None),
     ]
 elif ENV_NAME == 'antmaze':
     from utils.antmaze_benchmark import VelocityRewardFunction, SimplexRewardFunction, TestRewPath, TestRewLoop, TestRewMatrixEdges, goal_reaching_reward
@@ -1097,6 +1001,12 @@ def run_test_dmc(env, agent, benchmarks, benchmark_id, num_evals):
                 angmomentum = env.physics.named.data.subtree_angmom['torso'][1]
                 aux = np.array([horizontal_velocity, angmomentum])
             
+            elif state.shape[-1] == 78: # quadruped:
+                torso_velocity = env.physics.torso_velocity()
+                torso_upright = env.physics.torso_upright()
+                com_height = env.physics.named.data.sensordata['center_of_mass'].copy()[2]                    
+                aux = np.concatenate([torso_velocity, np.array([torso_upright]), np.array([com_height])])
+            
             observation_aux = np.concatenate([state, aux])
             
             produced_trajectory.append(observation_aux)
@@ -1220,7 +1130,7 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
         benchmark_reward_function, benchmark_test_label, benchmark_param = benchmarks[benchmark_id]
         print(benchmark_test_label)
         
-        if ENV_NAME in ['cheetah', 'walker']:
+        if ENV_NAME in ['cheetah', 'walker', 'quadruped']:
             produced_trajectory, produced_trajectory_physics, meta = run_test_dmc(
                 env, agent, benchmarks, benchmark_id=benchmark_id, num_evals=num_evals
             )
@@ -1245,13 +1155,20 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
             )
             axs[benchmark_id, 2].set_xlim([-25, 25])
         elif ENV_NAME == 'walker':
-            axs[benchmark_id, 0].scatter(eval_obs[..., 16], eval_obs[..., 24], c=real_eval_rewards)
-            axs[benchmark_id, 1].scatter(eval_obs[..., 16], eval_obs[..., 24], c=eval_rewards)
+            axs[benchmark_id, 0].scatter(eval_obs[..., 16], eval_aux[..., 0], c=real_eval_rewards)
+            axs[benchmark_id, 1].scatter(eval_obs[..., 16], eval_aux[..., 0], c=eval_rewards)
             axs[benchmark_id, 2].scatter(
                 produced_trajectory_physics[..., 1],
                 torch.arange(1000).unsqueeze(1).repeat(1, num_evals).T,
                 c='red', s=1
             )
+        elif ENV_NAME == 'quadruped':
+            produced_trajectory_aux = produced_trajectory[..., -5:]
+            axs[benchmark_id, 0].scatter(eval_aux[..., 0], eval_aux[..., 3], c=real_eval_rewards)
+            axs[benchmark_id, 1].scatter(eval_aux[..., 0], eval_aux[..., 3], c=eval_rewards)
+            for j in range(produced_trajectory.shape[0]):
+                axs[benchmark_id, 2].plot(produced_trajectory_aux[j, :, 0], produced_trajectory_aux[j, :, 3], c='red')
+        
         elif ENV_NAME == 'antmaze':
             axs[benchmark_id, 0].scatter(eval_obs[..., 0], eval_obs[..., 1], c=real_eval_rewards)
             axs[benchmark_id, 1].scatter(eval_obs[..., 0], eval_obs[..., 1], c=eval_rewards)
@@ -1287,6 +1204,8 @@ def run_benchmark(env, agent, benchmarks, num_evals, steps):
             trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -2:]).reshape(1, -1, 2)
         elif ENV_NAME == 'walker':
             trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -4:]).reshape(1, -1, 4) 
+        elif ENV_NAME == 'quadruped':
+            trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ..., -5:]).reshape(1, -1, 5) 
         elif ENV_NAME == 'antmaze':
             trajectory_states_aux = torch.tensor(all_produced_trajectories[benchmark_id, ...]).reshape(1, -1, STATE_DIM) 
 
@@ -1325,39 +1244,39 @@ rewards_logs = np.zeros((len(benchmarks), 0),)
 
 
 
-for step in tqdm(range(5_000)):
+for step in tqdm(range(2_000_000)):
 
     obs, action, next_obs, _ = get_iql_training_data(dataset, batch_size=1024)
 
     fb_agent.update(obs, action, next_obs, step=step)
     
     
-    if step % 50 == 0:
+    # if step % 50 == 0:
+        # torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
+    
+    if step % 20_000 == 0:
+    
+        benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=5, steps=step)
+        
+        rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
+        # print(rewards_logs)
+        num_cols = 4
+        num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
+        fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
+        axs = axs.flatten()
+        
+        for i in range(len(benchmarks)):
+            _, benchmark_test_label, _ = benchmarks[i]
+            axs[i].plot(rewards_logs[i])
+            axs[i].set_title(benchmark_test_label)
+    
+        plt.savefig(f"{LOGS_FOLDER}/rewards.png")
+        plt.close()
+        
+
+    if step % 200_000 == 0:
         torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
     
-    # if step % 50_000 == 0:
-    
-    #     benchmark_rewards = run_benchmark(env, fb_agent, benchmarks, num_evals=1, steps=step)
-        
-    #     rewards_logs = np.concatenate((rewards_logs, benchmark_rewards.reshape(-1, 1)), axis=-1)
-    #     # print(rewards_logs)
-    #     num_cols = 4
-    #     num_rows = len(benchmarks)//num_cols + int(len(benchmarks) % num_cols != 0)
-    #     fig, axs = plt.subplots(num_rows, num_cols, figsize=(num_cols*6, num_rows*5))
-    #     axs = axs.flatten()
-        
-    #     for i in range(len(benchmarks)):
-    #         _, benchmark_test_label, _ = benchmarks[i]
-    #         axs[i].plot(rewards_logs[i])
-    #         axs[i].set_title(benchmark_test_label)
-    
-    #     plt.savefig(f"{LOGS_FOLDER}/rewards.png")
-    #     plt.close()
-        
-                    
-    #     torch.save(fb_agent.state_dict(), f"{MODEL_SAVE_FOLDER}/fb_agent_step:{step}.pth")
-    
-    # break
 
 
 
