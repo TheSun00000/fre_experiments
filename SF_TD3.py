@@ -308,16 +308,24 @@ if __name__ == "__main__":
     date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
     
     exp_name = f'SF-TD3-{SF_METHOD}-{ENV_NAME}'
-        
+    
+    gmm_alpha = None
+    
     if TOP_EXPRESSIVITY_PERCENTAGE != 1 and isinstance(TOP_EXPRESSIVITY_PERCENTAGE, float):
         exp_name = f'{exp_name}-topp={TOP_EXPRESSIVITY_PERCENTAGE}'
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
         exp_name = f'{exp_name}-CEM'
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
         exp_name = f'{exp_name}-TRAJ_Z'
-    elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm' and 'alpha' not in kwargs:
         exp_name = f'{exp_name}-GMM'
-    
+    elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm' and 'alpha' in kwargs:
+        gmm_alpha = kwargs['alpha']
+        exp_name = f'{exp_name}-GMM-a={gmm_alpha}'
+        
+        
+    if "z_dim" in kwargs:
+        exp_name = f'{exp_name}-z={int(kwargs["z_dim"])}'
         
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
@@ -955,7 +963,7 @@ if __name__ == "__main__":
         
     def orth_loss_fn(z):
         cov = z.T @ z
-        id = torch.eye(50, dtype=torch.float32, device=device)
+        id = torch.eye(Z_DIM, dtype=torch.float32, device=device)
         orth_loss = (cov - id).pow(2).mean() + (torch.inverse(cov) - id).pow(2).mean() 
         return orth_loss
 
@@ -1028,7 +1036,8 @@ if __name__ == "__main__":
     ################################################################################################################################]:
 
 
-    Z_DIM = 50
+    Z_DIM = 50 if "z_dim" not in kwargs else int(kwargs["z_dim"])
+    print("Z_DIM:", Z_DIM)
     hidden_dim = 1024
     if SF_METHOD == 'orth':
         f_input_dim, f_output_dim = [STATE_DIM, STATE_DIM] 
@@ -1073,7 +1082,7 @@ if __name__ == "__main__":
         
         losses = []
         
-        for steps in tqdm(range(10), desc='SF agent training'):
+        for steps in tqdm(range(100_000), desc='SF agent training'):
         
             # break
             
@@ -1131,7 +1140,7 @@ if __name__ == "__main__":
             z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
             z = F.normalize(z, dim=-1)
             stored_zs.append(z.cpu())
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
             with torch.no_grad():
                 rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
                 # all_rewards.append(rewards.reshape(1000, 100))
@@ -1178,7 +1187,7 @@ if __name__ == "__main__":
             z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
             z = F.normalize(z, dim=-1)
             stored_zs.append(z)
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
             with torch.no_grad():
                 rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
                 expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
@@ -1202,7 +1211,7 @@ if __name__ == "__main__":
                 z = F.normalize(z, dim=-1)
                 test_stored_zs.append(z)
                 
-                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
                 
                 rewards = (sf_agent.g(observations) * z).sum(dim=-1).unsqueeze(-1).cpu().flatten()
                 test_all_rewards.append(rewards.reshape(1000, 100))
@@ -1218,8 +1227,8 @@ if __name__ == "__main__":
             L = torch.linalg.cholesky(cov)
             return mean + torch.randn(n, mean.numel(), device=mean.device) @ L.T 
 
-        mean = torch.zeros((50,), dtype=torch.float32, device=device)
-        cov = torch.eye(50, dtype=torch.float32, device=device)
+        mean = torch.zeros((Z_DIM,), dtype=torch.float32, device=device)
+        cov = torch.eye(Z_DIM, dtype=torch.float32, device=device)
         
         for _ in tqdm(range(5)):
             new_expressivities = []
@@ -1242,7 +1251,7 @@ if __name__ == "__main__":
                 
                 new_stored_zs.append(z)
                 
-                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
                 with torch.no_grad():
                     rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
                     new_expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
@@ -1279,7 +1288,7 @@ if __name__ == "__main__":
             sim_idz = (stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
             i = sim_idz[-1]
             z = stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
             with torch.no_grad():
                 rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
             axs[benchmark_id, 0].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
@@ -1290,7 +1299,7 @@ if __name__ == "__main__":
             sim_idz = (new_stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
             i = sim_idz[-1]
             z = new_stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
             with torch.no_grad():
                 rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
             axs[benchmark_id, 1].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
@@ -1299,7 +1308,7 @@ if __name__ == "__main__":
             # The reconstructed reward function:
             i = benchmark_id
             z = test_stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, 50)    
+            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
             with torch.no_grad():
                 rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
                 
@@ -1315,11 +1324,11 @@ if __name__ == "__main__":
             sf_agent_g_all_observations = [ sf_agent.g(dataset.trajectories[i].to(device)).cpu() for i in tqdm(range(len(dataset.trajectories)), desc='traj_z') ]
             sf_agent_g_all_observations = torch.stack(sf_agent_g_all_observations)
         
-        sf_agent_g_all_observations = sf_agent_g_all_observations.reshape(10000*10, 100, 50)
+        sf_agent_g_all_observations = sf_agent_g_all_observations.reshape(10000*10, 100, Z_DIM)
 
         trajectories_z = sf_agent_g_all_observations.mean(dim=1)
-        # trajectories_z = sf_agent_g_all_observations.reshape(10000*5, 200, 50).mean(dim=1)
-        # trajectories_z = sf_agent_g_all_observations.reshape(-1, 50)[torch.randint(0, 10000*1000, (50000,))]
+        # trajectories_z = sf_agent_g_all_observations.reshape(10000*5, 200, Z_DIM).mean(dim=1)
+        # trajectories_z = sf_agent_g_all_observations.reshape(-1, Z_DIM)[torch.randint(0, 10000*1000, (50000,))]
         trajectories_z = F.normalize(trajectories_z, dim=-1)
         trajectories_z = trajectories_z.to(device)
         
@@ -1568,6 +1577,21 @@ if __name__ == "__main__":
         z = z.to(device)  
         return z
     
+    def sample_z_from_set_with_alpha(num_reward_functions:int, set_of_zs, alpha:float):
+        n_from_set = int(num_reward_functions * alpha)
+        n_uniform = num_reward_functions - n_from_set
+        
+        z_from_set = set_of_zs[torch.randint(0, set_of_zs.shape[0], (n_from_set,))]
+        z_uniform = torch.normal(0, 1, size=(n_uniform, Z_DIM))
+        
+        
+        z = torch.concat([z_from_set, z_uniform], dim=0)
+        print(z_from_set.shape, z_uniform.shape, z.shape)
+        
+        z = F.normalize(z, dim=-1)
+        z = z.to(device)  
+        return z
+    
 
     for steps in tqdm(range(1_000_000)):
 
@@ -1585,8 +1609,10 @@ if __name__ == "__main__":
             z = sample_full(mean, cov, num_reward_functions)
         elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
             z = sample_z_from_set(num_reward_functions, trajectories_z)
-        elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm':
+        elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm' and gmm_alpha is None:
             z = sample_z_from_set(num_reward_functions, gmm_1m_z)
+        elif TOP_EXPRESSIVITY_PERCENTAGE == 'gmm' and (isinstance(gmm_alpha, float) or isinstance(gmm_alpha, int)):
+            z = sample_z_from_set_with_alpha(num_reward_functions, gmm_1m_z, alpha=gmm_alpha)
         else:
             raise ValueError('Wthh dude')
             
