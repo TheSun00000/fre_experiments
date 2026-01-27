@@ -279,7 +279,7 @@ if __name__ == "__main__":
     print(kwargs)
     
     assert kwargs['env_name'] in ["antmaze", "cheetah", "walker", "quadruped", "plusmaze"]
-    assert kwargs['sf_method'] in ["rand", "orth", "ae", "trans", "lra_p", "lra_sf", "fb"]
+    assert kwargs['sf_method'] in ["rand", "orth", "ae", "trans", "lra_p", "lra_sf", "byol", "byolg", "fb"]
 
     ENV_NAME = kwargs['env_name']
     SF_METHOD = kwargs['sf_method']
@@ -292,6 +292,10 @@ if __name__ == "__main__":
         TOP_EXPRESSIVITY_PERCENTAGE = kwargs['top_expressivity_percentage']
     else:
         TOP_EXPRESSIVITY_PERCENTAGE = 1.0
+    
+    n_gmm_components = 20
+    if "n_gmm" in kwargs:
+        n_gmm_components = int(kwargs["n_gmm"])
         
     ################################################################################################################################
 
@@ -327,10 +331,13 @@ if __name__ == "__main__":
     if "z_dim" in kwargs:
         exp_name = f'{exp_name}-z={int(kwargs["z_dim"])}'
         
+    if "n_gmm" in kwargs:
+        exp_name = f'{exp_name}-n_gmm={int(kwargs["n_gmm"])}'
+        
     if "suffix" in kwargs:
         exp_name = f'{exp_name}-{kwargs["suffix"]}'
         
-        
+    
         
         
     LOGS_FOLDER = f'./logs/{date_time_str}_{exp_name}'
@@ -573,18 +580,44 @@ if __name__ == "__main__":
             timeouts=dataset_timeouts
         )
 
+    
+    def sample_geometric_k(state_idx, len_trajectory, gamma):
+        """
+        Samples k ~ Geom(1 - gamma) and clamps it so state_idx + k stays in bounds.
+        state_idx: (batch_size,)
+        returns: (batch_size,)
+        """
+        
+        if gamma == 0:
+            print('pipipopo')
+            return 1
+        else:
+            geom = torch.distributions.Geometric(probs=1 - gamma)
+            k = geom.sample(state_idx.shape).long().squeeze(-1)
 
-    def get_iql_training_data(dataset:Dataset, batch_size):
+            k = k + 1
+            
+            max_k = (len_trajectory - 1) - state_idx
+            return torch.minimum(k, max_k)
+
+
+    def get_iql_training_data(dataset:Dataset, batch_size, gamma=0):
 
         num_trajectories, len_trajectory, obs_dim = dataset.trajectories.shape
 
         trajectory_idx = torch.randint(0, num_trajectories, (batch_size,))
         state_idx = torch.randint(0, len_trajectory, (batch_size,)) % (len_trajectory - 1)
 
+        if gamma == 0:
+            next_state_idx = state_idx + 1
+        else:
+            k = sample_geometric_k(state_idx, len_trajectory, gamma)
+            next_state_idx = state_idx + k
+        
         states = dataset.trajectories[trajectory_idx, state_idx].reshape(batch_size, obs_dim)
-        next_states = dataset.trajectories[trajectory_idx, state_idx+1].reshape(batch_size, obs_dim)
+        next_states = dataset.trajectories[trajectory_idx, next_state_idx].reshape(batch_size, obs_dim)
         actions = dataset.actions[trajectory_idx, state_idx].reshape(batch_size, -1)
-        timeout = dataset.timeouts[trajectory_idx, state_idx+1].reshape(batch_size, -1).float()
+        timeout = dataset.timeouts[trajectory_idx, next_state_idx].reshape(batch_size, -1).float()
         
         aux_ = aux[trajectory_idx, state_idx].reshape(batch_size, -1)
         aux_ = torch.tensor(aux_)
@@ -949,8 +982,16 @@ if __name__ == "__main__":
             self.target_g.load_state_dict(self.g.state_dict())
             
             
+            # Backward model for 'BYOL-gamma'
+            self.b = mlp(f_output_dim, hidden_dim, "ntanh", 
+                hidden_dim, "irelu",
+                hidden_dim, "irelu",
+                f_output_dim,
+            )
+            
             self.optimizer = torch.optim.Adam([
                     {'params': self.f.parameters()},  # type: ignore
+                    {'params': self.b.parameters()},
                     {'params': self.g.parameters()}
                 ],
                 lr=1e-4
@@ -1032,6 +1073,40 @@ if __name__ == "__main__":
         loss += orth_loss_fn(g)
         
         return loss
+    
+    
+    def BYOL_loss(sf_agent, obs, action, next_obs):
+        g = sf_agent.g(obs)
+        f = sf_agent.f(torch.concat([g, action], dim=-1))
+        
+        with torch.no_grad():
+            next_g = sf_agent.target_g(next_obs)
+
+        loss = (f - next_g).pow(2).mean() + orth_loss_fn(g)
+        
+        return loss
+
+
+    def BYOL_gamma_loss(sf_agent, obs, action, next_obs):
+        
+        with torch.no_grad():
+            target_phi_obs      = sf_agent.target_g(obs)
+            target_phi_next_obs = sf_agent.target_g(next_obs)
+        
+        # Forward:
+        phi_obs = sf_agent.g(obs)
+        f = sf_agent.f(torch.concat([phi_obs, action], dim=-1))
+        
+        # Backward:
+        phi_next_obs = sf_agent.g(next_obs)
+        b = sf_agent.b(phi_next_obs)
+
+        loss_forward  = (f - target_phi_next_obs).pow(2).mean() 
+        loss_backward = (target_phi_obs - b).pow(2).mean() 
+        
+        loss = loss_forward + loss_backward + orth_loss_fn(phi_obs)
+        
+        return loss
 
     ################################################################################################################################]:
 
@@ -1059,6 +1134,14 @@ if __name__ == "__main__":
         f_input_dim, f_output_dim = [STATE_DIM, Z_DIM] 
         g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
         sf_loss_function = LRA_SF_loss
+    elif SF_METHOD == 'byol':
+        f_input_dim, f_output_dim = [Z_DIM + ACTION_DIM, Z_DIM] 
+        g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
+        sf_loss_function = BYOL_loss
+    elif SF_METHOD == 'byolg':
+        f_input_dim, f_output_dim = [Z_DIM + ACTION_DIM, Z_DIM] 
+        g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
+        sf_loss_function = BYOL_gamma_loss
     elif SF_METHOD == 'fb':
         f_input_dim, f_output_dim = [STATE_DIM + ACTION_DIM, Z_DIM] 
         g_input_dim, g_output_dim = [STATE_DIM, Z_DIM]
@@ -1086,7 +1169,7 @@ if __name__ == "__main__":
         
             # break
             
-            obs, action, next_obs, timeout, _ = get_iql_training_data(dataset, batch_size=1024)
+            obs, action, next_obs, timeout, _ = get_iql_training_data(dataset, batch_size=1024, gamma=0 if SF_METHOD != 'byolg' else 0.99)
             # random_obs = next_obs[torch.randperm(next_obs.shape[0])]
             
             loss = sf_loss_function(sf_agent, obs, action, next_obs)
@@ -1165,160 +1248,7 @@ if __name__ == "__main__":
         plt.close()
         
         
-        
-    elif TOP_EXPRESSIVITY_PERCENTAGE == 'CEM':
-        
-        
-        
-        expressivities = []
-        stored_zs = []
-
-        num_reward_functions = 1
-        num_states = 100000
-        observations, actions, next_observations, terminals, obs_aux = get_iql_training_data(dataset, batch_size=num_states)
-        observations = dataset.trajectories[::10, ::10].to(device).reshape(-1, STATE_DIM)
-        obs_aux = torch.tensor(aux[::10, ::10]).to(device).reshape(-1, aux.shape[-1])
-
-        with torch.no_grad():
-            sf_agent_g_observations = sf_agent.g(observations)
-
-
-        for _ in tqdm(range(10000)):
-            z = torch.normal(0, 1, size=(num_reward_functions, Z_DIM), device=device)
-            z = F.normalize(z, dim=-1)
-            stored_zs.append(z)
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-            with torch.no_grad():
-                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
-                expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
-
-        expressivities = torch.tensor(expressivities)
-        stored_zs = torch.concat(stored_zs)
-
-        idz = expressivities.argsort()
-        expressivities = expressivities[idz]
-        stored_zs = stored_zs[idz]
-        
-        
-        test_all_rewards = []
-        test_stored_zs = []
-
-        for benchmark_id in tqdm(range(len(benchmarks))):    
-            with torch.no_grad():
-                benchmark_reward_function, _, benchmark_param = benchmarks[benchmark_id]
-                rewards_ = benchmark_reward_function(obs_aux.cpu(), benchmark_param)
-                z = (sf_agent_g_observations * rewards_.unsqueeze(-1).cuda()).mean(dim=0)
-                z = F.normalize(z, dim=-1)
-                test_stored_zs.append(z)
-                
-                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-                
-                rewards = (sf_agent.g(observations) * z).sum(dim=-1).unsqueeze(-1).cpu().flatten()
-                test_all_rewards.append(rewards.reshape(1000, 100))
-
-
-        test_all_rewards = torch.stack(test_all_rewards)
-        test_cum_rewards = test_all_rewards.mean(dim=-1)
-        test_stored_zs = torch.stack(test_stored_zs)
-        
-        
-        
-        def sample_full(mean, cov, n):
-            L = torch.linalg.cholesky(cov)
-            return mean + torch.randn(n, mean.numel(), device=mean.device) @ L.T 
-
-        mean = torch.zeros((Z_DIM,), dtype=torch.float32, device=device)
-        cov = torch.eye(Z_DIM, dtype=torch.float32, device=device)
-        
-        for _ in tqdm(range(5)):
-            new_expressivities = []
-            new_stored_zs = []
-
-            num_reward_functions = 1
-            num_states = 100000
-            observations, actions, next_observations, terminals, obs_aux = get_iql_training_data(dataset, batch_size=num_states)
-            observations = dataset.trajectories[::10, ::10].to(device).reshape(-1, STATE_DIM)
-            obs_aux = torch.tensor(aux[::10, ::10]).to(device).reshape(-1, aux.shape[-1])
-
-            with torch.no_grad():
-                sf_agent_g_observations = sf_agent.g(observations)
-
-
-            for _ in range(2000):
-                
-                z = sample_full(mean, cov, n=1)    
-                z = F.normalize(z, dim=-1)
-                
-                new_stored_zs.append(z)
-                
-                z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-                with torch.no_grad():
-                    rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
-                    new_expressivities.append(  signal2noise(rewards.reshape(1000, 100)).item()  )
-
-            new_expressivities = torch.tensor(new_expressivities)
-            new_stored_zs = torch.concat(new_stored_zs)
-
-            idz = new_expressivities.argsort()
-            new_expressivities = new_expressivities[idz]
-            new_stored_zs = new_stored_zs[idz]
-
-
-            # elites = new_stored_zs[-1000:]
-            # mean = elites.mean(dim=0)
-            # diff = elites - mean
-            # K = elites.shape[0]
-            # cov = diff.T @ diff / K
-            
-        # set_of_zs = new_stored_zs
-            
-        _, bins, _ = plt.hist(expressivities, bins=100)
-        _, bins, _ = plt.hist(new_expressivities, bins=100)
-        
-        plt.savefig(f"{LOGS_FOLDER}/new_expressivities.png")
-        plt.close()
-        
-        
-        
-        fig, axs = plt.subplots(len(benchmarks), 3, figsize=(15, len(benchmarks)*4))
-
-        for benchmark_id in range(len(benchmarks)):
-
-            # Find the closest latent in the old z set:
-            sim_idz = (stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
-            i = sim_idz[-1]
-            z = stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-            with torch.no_grad():
-                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
-            axs[benchmark_id, 0].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
-            axs[benchmark_id, 0].set_title('closest from expressivities')
-
-
-            # Find the closest latent in the new z set (after expressivity maximization):
-            sim_idz = (new_stored_zs @ test_stored_zs[[benchmark_id]].T).flatten().argsort()
-            i = sim_idz[-1]
-            z = new_stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-            with torch.no_grad():
-                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
-            axs[benchmark_id, 1].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
-            axs[benchmark_id, 1].set_title('closest from new_expressivities')
-
-            # The reconstructed reward function:
-            i = benchmark_id
-            z = test_stored_zs[[i]]
-            z = z.unsqueeze(1).repeat(1, num_states, 1).reshape(-1, Z_DIM)    
-            with torch.no_grad():
-                rewards = (sf_agent_g_observations * z).sum(dim=-1).unsqueeze(-1).cpu()
-                
-            axs[benchmark_id, 2].scatter(observations[::10, 8].cpu(), obs_aux[::10, 0].cpu(), c=rewards[::10], vmin=-2, vmax=2)
-            axs[benchmark_id, 2].set_title('real')
-
-        plt.savefig(f"{LOGS_FOLDER}/old_vs_new_zs.png")
-        plt.close()
-    # break
-    
+ 
     elif TOP_EXPRESSIVITY_PERCENTAGE == 'traj_z':
         with torch.no_grad():
             sf_agent_g_all_observations = [ sf_agent.g(dataset.trajectories[i].to(device)).cpu() for i in tqdm(range(len(dataset.trajectories)), desc='traj_z') ]
@@ -1351,7 +1281,7 @@ if __name__ == "__main__":
 
         # --- Usage Example ---
         # sub_trajectory_z = np.random.randn(1000, 64) # Replace with your real data
-        sampler = LatentTaskSampler(n_components=20)
+        sampler = LatentTaskSampler(n_components=n_gmm_components)
         sampler.fit(trajectories_z.cpu())
 
         
